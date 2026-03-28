@@ -25,7 +25,7 @@ SESSION_FILE = Path("max_session.txt")
 MODULES_DIR = Path("modules")
 CONFIG_FILE = Path("userbot_config.json")
 ACCOUNTS_FILE = Path("accounts.json")
-DEFAULT_PREFIX = "!"
+DEFAULT_PREFIX = "."
 START_TS = int(time.time())
 
 
@@ -210,7 +210,7 @@ class ModuleRegistry:
                 c("autoupdate", "switch autoupdate state"), c("changelog", "Show changelog"), c("restart", "Перезагрузка"),
                 c("rollback", "Откат обновлений"), c("source", "Ссылка на исходники"), c("ubstop", "Остановить юзербот"), c("update", "Скачать обновления"),
             ]),
-            BotModule("Translator", "Переводит текст", [c("tr", "!tr [язык] [текст]")]),
+            BotModule("Translator", "Переводит текст", [c("tr", ".tr [язык] [текст]")]),
             BotModule("Translations", "Processes internal translations", [c("dllangpack", "Внешний пак перевода"), c("setlang", "Изменить язык")]),
             BotModule("Tester", "Самотестирование", [c("clearlogs", "Очистить логи"), c("logs", "Отправить лог"), c("ping", "Пинг"), c("suspend", "Пауза")]),
             BotModule("Terminal", "Runs commands", [c("terminal", "Запустить команду"), c("terminate", "Убить процесс")]),
@@ -274,7 +274,7 @@ class ModuleRegistry:
             lines.append(f"ℹ️ {module.description}")
             for cmd in module.commands:
                 alias = f" ({', '.join(cmd.aliases)})" if cmd.aliases else ""
-                lines.append(f"▫️ !{cmd.name}{alias} — {cmd.description}")
+                lines.append(f"▫️ .{cmd.name}{alias} — {cmd.description}")
             lines.append("☝️ Это встроенный модуль. Вы не можете его выгрузить или заменить")
             lines.append("")
         return "\n".join(lines).strip()
@@ -484,7 +484,10 @@ weather_client = WeatherClient()
 
 
 def normalize_command(text: str) -> str:
-    return f"!{text[1:]}" if text.startswith(".") else text
+    # поддерживаем оба префикса, но стандартный — точка
+    if text.startswith("!"):
+        return f".{text[1:]}"
+    return text
 
 
 def extract_reply_py(packet: dict) -> str | None:
@@ -541,16 +544,16 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
             details = [f"<b>{module.name}</b>", module.description, ""]
             for item in module.commands:
                 alias = f" ({', '.join(item.aliases)})" if item.aliases else ""
-                details.append(f"▫️ !{item.name}{alias} - {item.description}")
+                details.append(f"▫️ .{item.name}{alias} - {item.description}")
             details.append("\n☝️ Это встроенный модуль. Вы не можете его выгрузить или заменить")
             await edit_message(client, destination_chat, message_id, to_html("\n".join(details)))
         else:
-            await edit_message(client, destination_chat, message_id, "<b>Help:</b> !modules, !weburl, !loadmod, !config, !fconfig, !react")
+            await edit_message(client, destination_chat, message_id, "<b>Help:</b> .modules, .weburl, .loadmod, .config, .fconfig, .react")
         return True
 
     if cmd == "helphide":
         if not arg:
-            await edit_message(client, destination_chat, message_id, "Использование: !helphide <module>")
+            await edit_message(client, destination_chat, message_id, "Использование: .helphide <module>")
             return True
         hidden = module_registry.toggle_hidden(arg)
         if hidden is None:
@@ -570,7 +573,7 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
 
     if cmd == "config":
         if not arg:
-            await edit_message(client, destination_chat, message_id, "Использование: !config <module>")
+            await edit_message(client, destination_chat, message_id, "Использование: .config <module>")
             return True
         conf = module_registry.module_config(config_store.data, arg)
         config_store.save()
@@ -581,7 +584,7 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
     if cmd == "fconfig":
         m = re.match(r"(\S+)\s+(\S+)\s+(.+)", arg)
         if not m:
-            await edit_message(client, destination_chat, message_id, "Использование: !fconfig <module> <key> <value>")
+            await edit_message(client, destination_chat, message_id, "Использование: .fconfig <module> <key> <value>")
             return True
         module_name, key, value = m.groups()
         module_registry.module_config(config_store.data, module_name)[key] = value
@@ -595,7 +598,7 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
         return True
 
     if cmd == "addacc":
-        await edit_message(client, destination_chat, message_id, "Добавление аккаунтов доступно в Web UI (!weburl)")
+        await edit_message(client, destination_chat, message_id, "Добавление аккаунтов доступно в Web UI (.weburl)")
         return True
 
     if cmd == "accounts":
@@ -611,7 +614,7 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
         # !react <message_id> <emoji>
         m = re.match(r"(\S+)\s+(.+)", arg)
         if not m:
-            await edit_message(client, destination_chat, message_id, "Использование: !react <message_id> <emoji>")
+            await edit_message(client, destination_chat, message_id, "Использование: .react <message_id> <emoji>")
             return True
         target_message_id, emoji = m.groups()
         await api.react(destination_chat, target_message_id, emoji.strip())
@@ -622,7 +625,7 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
         # !setname <first> [last]
         parts = arg.split(maxsplit=1)
         if not parts:
-            await edit_message(client, destination_chat, message_id, "Использование: !setname <first> [last]")
+            await edit_message(client, destination_chat, message_id, "Использование: .setname <first> [last]")
             return True
         first = parts[0]
         last = parts[1] if len(parts) > 1 else ""
@@ -632,7 +635,7 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
 
     if cmd == "setbio":
         if not arg:
-            await edit_message(client, destination_chat, message_id, "Использование: !setbio <bio>")
+            await edit_message(client, destination_chat, message_id, "Использование: .setbio <bio>")
             return True
         await api.update_profile(bio=arg)
         await edit_message(client, destination_chat, message_id, "Био обновлено")
@@ -640,7 +643,7 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
 
     if cmd == "setfav":
         if not arg:
-            await edit_message(client, destination_chat, message_id, "Использование: !setfav <chat_id>")
+            await edit_message(client, destination_chat, message_id, "Использование: .setfav <chat_id>")
             return True
         config_store.data.favorites_chat_id = int(arg)
         config_store.save()
@@ -649,10 +652,10 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
 
     if cmd == "favsay":
         if config_store.data.favorites_chat_id is None:
-            await edit_message(client, destination_chat, message_id, "Сначала: !setfav <chat_id>")
+            await edit_message(client, destination_chat, message_id, "Сначала: .setfav <chat_id>")
             return True
         if not arg:
-            await edit_message(client, destination_chat, message_id, "Использование: !favsay <text>")
+            await edit_message(client, destination_chat, message_id, "Использование: .favsay <text>")
             return True
         await send_message(client, int(config_store.data.favorites_chat_id), arg)
         await edit_message(client, destination_chat, message_id, "Отправлено в избранное")
@@ -661,7 +664,7 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
     if cmd in {"loadmod", "lm"}:
         path = arg.strip() or extract_reply_py(packet)
         if not path:
-            await edit_message(client, destination_chat, message_id, "!loadmod modules/<file.py> или reply на .py")
+            await edit_message(client, destination_chat, message_id, ".loadmod modules/<file.py> или reply на .py")
             return True
         result = await module_registry.load_external_module(path)
         await edit_message(client, destination_chat, message_id, html.escape(result))
@@ -679,7 +682,7 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
 
     if cmd == "weather":
         if not arg:
-            await edit_message(client, destination_chat, message_id, "Использование: !weather <город>")
+            await edit_message(client, destination_chat, message_id, "Использование: .weather <город>")
             return True
         weather = await weather_client.get(arg)
         await edit_message(client, destination_chat, message_id, to_html(weather))
@@ -687,14 +690,14 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
 
     if cmd == "say":
         if not arg:
-            await edit_message(client, destination_chat, message_id, "Использование: !say <текст>")
+            await edit_message(client, destination_chat, message_id, "Использование: .say <текст>")
             return True
         await send_message(client, destination_chat, arg)
         return True
 
     if cmd == "md":
         if not arg:
-            await edit_message(client, destination_chat, message_id, "Использование: !md <text>")
+            await edit_message(client, destination_chat, message_id, "Использование: .md <text>")
             return True
         rendered = safe_markdown(arg) if config_store.data.markdown_enabled else arg
         await edit_message(client, destination_chat, message_id, to_html(rendered))
@@ -703,7 +706,7 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
     if cmd == "randomsend":
         # debug/demo function for safe destination routing
         if not arg:
-            await edit_message(client, destination_chat, message_id, "Использование: !randomsend <текст>")
+            await edit_message(client, destination_chat, message_id, "Использование: .randomsend <текст>")
             return True
         chats = [destination_chat]
         if config_store.data.favorites_chat_id is not None:

@@ -28,10 +28,10 @@
 
 - Встроенная система модулей (18 core модулей, стиль как в Heroku).
 - Все core модули защищены от выгрузки/замены.
-- Конфиги модулей через сообщения (`!config`, `!fconfig`) + Web UI.
+- Конфиги модулей через сообщения (`.config`, `.fconfig`) + Web UI.
 - Мультиаккаунт-фундамент (`accounts.json`) + добавление аккаунтов в Web UI.
 - Web UI в тёмном стиле с боковым меню, карточками модулей и панелью конфигов.
-- Поддержка reply-загрузки модулей (`!loadmod` reply на `.py`).
+- Поддержка reply-загрузки модулей (`.loadmod` reply на `.py`).
 - Базовые методы для разработчиков модулей:
   - динамические команды,
   - watcher-ы пакетов,
@@ -40,7 +40,7 @@
   - реакции на сообщения,
   - смена имени/фамилии/био,
   - работа с избранным.
-- Markdown helper (`!md`) и HTML-safe вывод.
+- Markdown helper (`.md`) и HTML-safe вывод.
 - Защита от случайной отправки в другой чат во время обработки команды.
 
 ---
@@ -64,28 +64,28 @@ python userbot.py
 
 ## 🧩 Ключевые команды
 
-- `!modules` / `!ml`
-- `!help [module|command]`
-- `!helphide <module>`
-- `!config <module>`
-- `!fconfig <module> <key> <value>`
-- `!weburl`
-- `!addacc`
-- `!accounts`
-- `!loadmod <modules/file.py>` (или reply на `.py`)
-- `!unloadmod <module>`
-- `!react <message_id> <emoji>`
-- `!setname <first> [last]`
-- `!setbio <text>`
-- `!setfav <chat_id>`
-- `!favsay <text>`
-- `!md <text>`
+- `.modules` / `.ml`
+- `.help [module|command]`
+- `.helphide <module>`
+- `.config <module>`
+- `.fconfig <module> <key> <value>`
+- `.weburl`
+- `.addacc`
+- `.accounts`
+- `.loadmod <modules/file.py>` (или reply на `.py`)
+- `.unloadmod <module>`
+- `.react <message_id> <emoji>`
+- `.setname <first> [last]`
+- `.setbio <text>`
+- `.setfav <chat_id>`
+- `.favsay <text>`
+- `.md <text>`
 
 ---
 
 ## 🌐 Web UI (beta)
 
-Web UI по команде `!weburl`.
+Web UI по команде `.weburl` (также поддерживается `!weburl`).
 
 Что уже есть:
 - сайдбар модулей,
