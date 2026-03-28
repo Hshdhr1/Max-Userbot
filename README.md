@@ -1,68 +1,122 @@
-<div align="center">
-  <img src="https://github.com/hikariatama/assets/raw/master/1326-command-window-line-flat.webp" height="80" alt="MAX Userbot logo">
-  <h1>Max Userbot</h1>
-  <p>Advanced MAX (OneMe) userbot with module system, multi-account foundations and modern Web UI</p>
+<p align="center">
+  <img src="https://github.com/Igroshka/Maxli/blob/main/logo.png?raw=true" alt="Maxli Logo" width="150" style="border-radius:50% !important;" />
+</p>
 
-  <p>
-    <img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="Python 3.10+">
-    <img src="https://img.shields.io/badge/platform-MAX%20OneMe-7c3aed" alt="MAX OneMe">
-    <img src="https://img.shields.io/badge/ui-web--beta-16a34a" alt="Web UI beta">
-    <img src="https://img.shields.io/badge/modules-core%2018-orange" alt="18 core modules">
-  </p>
-</div>
+<h1 align="center">Max Userbot — UserBot для мессенджера MAX</h1>
 
----
+<p align="center">
+  <a href="#"><img src="https://img.shields.io/badge/Stars-Welcome-FFC107?style=for-the-badge&logo=github" alt="Stars"></a>
+  <a href="#license"><img src="https://img.shields.io/badge/License-Apache--2.0-8BC34A?style=for-the-badge" alt="License"></a>
+  <a href="https://UserbotMax.t.me"><img src="https://img.shields.io/badge/Telegram-Новости-blue?style=for-the-badge&logo=telegram" alt="Telegram Channel"></a>
+</p>
 
-## ⚠️ Security Notice
-
-> Установка модулей из недоверенных источников может повредить аккаунт/сервер.
->
-> **Рекомендации:**
-> - ✅ Ставь модули только из доверенных репозиториев.
-> - ❌ Не запускай подозрительные команды (`!terminal`, `!e`, `!ecpp`, ...).
-> - ✅ Делай регулярные бэкапы и включай ограничения API.
+<p align="center">
+  ⚡️ UserBot для <b>MAX (OneMe)</b> с модульной системой, Web UI и базой для мультиаккаунтов.<br>
+  Создан для автоматизации, расширяемости и удобной разработки модулей.
+</p>
 
 ---
 
-## 🚀 Возможности
+## 🚀 О проекте
 
-- Встроенная система модулей (18 core модулей, стиль как в Heroku).
-- Все core модули защищены от выгрузки/замены.
-- Конфиги модулей через сообщения (`.config`, `.fconfig`) + Web UI.
-- Мультиаккаунт-фундамент (`accounts.json`) + добавление аккаунтов в Web UI.
-- Web UI в тёмном стиле с боковым меню, карточками модулей и панелью конфигов.
-- Поддержка reply-загрузки модулей (`.loadmod` reply на `.py`).
-- Базовые методы для разработчиков модулей:
-  - динамические команды,
-  - watcher-ы пакетов,
-  - отправка собственных opcode.
-- API-расширения:
-  - реакции на сообщения,
-  - смена имени/фамилии/био,
-  - работа с избранным.
-- Markdown helper (`.md`) и HTML-safe вывод.
-- Защита от случайной отправки в другой чат во время обработки команды.
+`Max Userbot` — это Python-проект с упором на:
+
+- модульность (встроенные и внешние модули),
+- удобное управление через сообщения,
+- Web UI для модулей/конфигов/аккаунтов,
+- расширяемый API-слой для opcode-операций.
+
+Базовая библиотека: [`vkmax`](https://pypi.org/project/vkmax/).
 
 ---
 
-## 📦 Установка
+## ✨ Ключевые возможности
+
+- 🧩 **Система модулей** (core + внешние `.py` модули через `.loadmod`)
+- 🔒 **Защита core-модулей** от выгрузки/замены
+- ⚙️ **Конфиги модулей** через `.config/.fconfig` и через Web UI
+- 🌐 **Web UI (beta)**: модули, конфиги, подключённые аккаунты
+- 👥 **Мультиаккаунт-база** (`accounts.json`, старт логики add account)
+- 😀 **Реакции через API** (`.react`)
+- 👤 **Смена профиля** (`.setname`, `.setbio`)
+- ⭐ **Работа с избранным** (`.setfav`, `.favsay`)
+- 📝 **Markdown helper** (`.md`) + безопасный HTML-вывод
+- 🛡 **Guard от случайной отправки** не в тот чат во время обработки
+- 🔁 **Совместимость префиксов:** стандартный `.` + поддержка `!`
+
+---
+
+## 📋 Требования
+
+| Требование | Версия |
+|------------|--------|
+| Python     | 3.10+  |
+| pip        | Любая  |
+| Git        | Любая  |
+
+Проверка:
 
 ```bash
-python -m venv .venv
+python --version
+pip --version
+git --version
+```
+
+---
+
+## 🛠️ Установка
+
+### Linux / macOS
+
+```bash
+git clone <YOUR_REPO_URL>
+cd Max-Userbot
+python3 -m venv .venv
 source .venv/bin/activate
+pip install -r requirements.txt
+python userbot.py
+```
+
+### Windows (PowerShell)
+
+```powershell
+git clone <YOUR_REPO_URL>
+cd Max-Userbot
+python -m venv .venv
+.venv\Scripts\activate
 pip install -r requirements.txt
 python userbot.py
 ```
 
 ### Первый запуск
 
-1. Введи номер в формате `+79990000000`.
-2. Введи SMS-код.
-3. Сессия сохранится в `max_session.txt`.
+1. Введите номер в формате `+79001234567`
+2. Введите SMS-код из MAX
+3. Сессия сохранится в `max_session.txt`
 
 ---
 
-## 🧩 Ключевые команды
+## 🔄 Повторный запуск
+
+### Linux / macOS
+
+```bash
+cd Max-Userbot
+source .venv/bin/activate
+python userbot.py
+```
+
+### Windows
+
+```powershell
+cd Max-Userbot
+.venv\Scripts\activate
+python userbot.py
+```
+
+---
+
+## 🧩 Основные команды
 
 - `.modules` / `.ml`
 - `.help [module|command]`
@@ -81,36 +135,90 @@ python userbot.py
 - `.favsay <text>`
 - `.md <text>`
 
+> Также поддерживаются команды с `!`, но стандартный префикс — `.`
+
 ---
 
-## 🌐 Web UI (beta)
+## 🌐 Web UI
 
-Web UI по команде `.weburl` (также поддерживается `!weburl`).
+Запуск через команду `.weburl`.
 
 Что уже есть:
-- сайдбар модулей,
-- дашборд статов,
-- подключённые аккаунты,
-- начало логики мультиаккаунтов,
-- форма изменения конфигов модулей.
+
+- sidebar с модулями,
+- dashboard карточки (клиенты/модули/uptime),
+- список подключённых аккаунтов,
+- форма добавления аккаунта,
+- форма редактирования модульных конфигов.
+
+---
+
+## 📁 Структура проекта
+
+```text
+Max-Userbot/
+├── userbot.py
+├── requirements.txt
+├── README.md
+├── MODULES.md
+├── IDEAS.md
+└── modules/
+    └── examples/
+        ├── echo_plugin.py
+        └── opcode_watcher_plugin.py
+```
 
 ---
 
 ## 🧠 Документация
 
-- Черновик по модульной системе: [`MODULES.md`](MODULES.md)
+- Модульная система: [`MODULES.md`](MODULES.md)
 - 100 идей развития: [`IDEAS.md`](IDEAS.md)
-- Примеры плагинов:
+- Примеры модулей:
   - `modules/examples/echo_plugin.py`
   - `modules/examples/opcode_watcher_plugin.py`
 
 ---
 
-## 🛡 Дисклеймер
+## ❓ FAQ
 
-Проект предоставляется «как есть». Автор не несёт ответственности за:
-- блокировки аккаунта,
-- утечки сессий,
-- последствия запуска вредоносных модулей.
+<details>
+<summary><b>Как войти заново (сбросить сессию)?</b></summary>
 
-Используй осторожно и в рамках правил платформы.
+Удалите `max_session.txt` и перезапустите `python userbot.py`.
+
+</details>
+
+<details>
+<summary><b>Почему не работает Web UI?</b></summary>
+
+Проверьте порт `8088`, и что команда `.weburl` была выполнена после запуска бота.
+
+</details>
+
+<details>
+<summary><b>Можно ли писать свои модули?</b></summary>
+
+Да, через `setup(registry)` + `register_module` / `register_dynamic_command` / `register_watcher`.
+
+</details>
+
+---
+
+## ⚠️ Security Notice
+
+- Не устанавливайте модули из неизвестных источников.
+- Будьте осторожны с мощными командами (`.terminal`, `.e`, `.ecpp`, ...).
+- Не публикуйте `max_session.txt` и токены.
+
+---
+
+## 📜 License
+
+Apache License 2.0.
+
+---
+
+<p align="center">
+  <b>⭐ Если проект полезен — поставьте звезду!</b>
+</p>
