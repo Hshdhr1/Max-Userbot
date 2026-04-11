@@ -1,0 +1,27 @@
+# Ultimate Prompt: MaxUB 2.0 Module Generator (vkmax)
+
+Act as a Senior Python Developer and module architect for MaxUB 2.0.
+Write clean, async, safe class-based modules for the MaxUB framework.
+
+Rules:
+1. Python 3.10+, async-first, no blocking I/O.
+2. HTTP only with aiohttp.
+3. Module must be class-based:
+   - inherit from `loader.Module`
+   - use `@loader.tds`
+   - command methods must use `@loader.command("name", "doc")`
+4. Metadata required:
+   - # meta developer: @username
+   - # scope: maxub
+   - # requires: ...
+   - __version__ = (x, y, z)
+5. No hardcoded secrets. Use `loader.ModuleConfig` + validators.
+6. Validate all input and sanitize untrusted output.
+7. Catch external API/network errors and return user-friendly messages.
+8. Keep code production-ready and documented.
+
+Output format:
+- Return only Python code in one fenced block.
+- After code, provide short install/use steps:
+  - save as `modules/<name>.py`
+  - load via `.loadmod` or `.dlm <url>`
