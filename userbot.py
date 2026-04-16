@@ -336,17 +336,48 @@ class WebUIManager:
 
     def _module_panel(self, module: BotModule) -> str:
         module_conf = self.config_store.data.module_configs.get(module.name.lower(), {})
-        options_html = "".join(
-            f"<div class='cfg-row'><label>{html.escape(k)}</label><input name='value' value='{html.escape(str(v))}'><input type='hidden' name='module' value='{html.escape(module.name)}'><input type='hidden' name='key' value='{html.escape(k)}'><button>Save</button></div>"
-            for k, v in module_conf.items()
-        ) or "<div class='muted'>Нет конфигов (добавь через сообщения или API)</div>"
+        default_conf = module.default_config or {}
+        
+        # Объединяем текущий конфиг с дефолтным для отображения
+        display_conf = {**default_conf, **module_conf}
+        
+        options_html = ""
+        for k, v in display_conf.items():
+            val = module_conf.get(k, v)
+            options_html += f"""
+            <div class='cfg-row'>
+                <label>{html.escape(k)}</label>
+                <input name='value' value='{html.escape(str(val))}'>
+                <input type='hidden' name='module' value='{html.escape(module.name)}'>
+                <input type='hidden' name='key' value='{html.escape(k)}'>
+                <button type='submit'>Save</button>
+            </div>"""
+        
+        if not options_html:
+            options_html = "<div class='muted'>Нет конфигов (добавь через сообщения или API)</div>"
+        else:
+            options_html = f"<form method='post' action='/api/config'>{options_html}</form>"
+
+        # Документация модуля
+        doc_html = ""
+        if module.description:
+            doc_html = f"<div class='module-doc'><p>{html.escape(module.description)}</p></div>"
+        
+        commands_doc = ""
+        if module.commands:
+            commands_doc = "<div class='commands-list'><h4>Команды:</h4><ul>"
+            for cmd in module.commands:
+                aliases = f" ({', '.join(cmd.aliases)})" if cmd.aliases else ""
+                commands_doc += f"<li><code>.{cmd.name}{aliases}</code> — {html.escape(cmd.description)}</li>"
+            commands_doc += "</ul></div>"
 
         return (
             "<section class='module-card'>"
             f"<h3>{html.escape(module.name)}</h3>"
-            f"<p>{html.escape(module.description)}</p>"
-            f"<small>{len(module.commands)} commands</small>"
-            f"<form method='post' action='/api/config'>{options_html}</form>"
+            f"{doc_html}"
+            f"{commands_doc}"
+            f"<h4>Конфигурация:</h4>"
+            f"{options_html}"
             "</section>"
         )
 
@@ -385,13 +416,23 @@ body {{ margin:0; background:var(--bg); color:var(--text); font-family:Inter,Ari
 .stat {{ background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; }}
 .stat h2 {{ margin:0; font-size:30px; color:#20d38a; }}
 .accounts, .modules {{ background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; margin-top:12px; }}
-.module-grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); gap:10px; }}
-.module-card {{ background:#101523; border:1px solid var(--line); border-radius:12px; padding:12px; }}
-.module-card p {{ color:var(--muted); margin:6px 0; }}
-.cfg-row {{ display:flex; gap:8px; margin-top:8px; }}
-.cfg-row input {{ flex:1; padding:8px; background:#0f1320; border:1px solid var(--line); color:var(--text); border-radius:8px; }}
-button {{ background:#315efb; color:white; border:none; border-radius:8px; padding:8px 12px; cursor:pointer; }}
-.muted {{ color:var(--muted); }}
+.module-grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); gap:14px; }}
+.module-card {{ background:#101523; border:1px solid var(--line); border-radius:12px; padding:16px; }}
+.module-card h3 {{ margin:0 0 8px; font-size:18px; color:#fff; }}
+.module-card h4 {{ margin:14px 0 8px; font-size:14px; color:#8d97b5; text-transform:uppercase; letter-spacing:0.5px; }}
+.module-doc {{ background:#0f1320; border-radius:8px; padding:10px; margin:8px 0; }}
+.module-doc p {{ margin:0; color:#c7d2fe; line-height:1.5; }}
+.commands-list {{ margin:8px 0; }}
+.commands-list ul {{ list-style:none; padding:0; margin:0; }}
+.commands-list li {{ padding:6px 0; border-bottom:1px solid #1f2937; font-size:13px; }}
+.commands-list li:last-child {{ border-bottom:none; }}
+.commands-list code {{ background:#1f2937; padding:2px 6px; border-radius:4px; color:#60a5fa; font-family:'Consolas','Monaco',monospace; font-size:12px; }}
+.cfg-row {{ display:flex; gap:8px; margin-top:8px; align-items:center; }}
+.cfg-row label {{ min-width:120px; font-size:13px; color:#a5b4fc; }}
+.cfg-row input {{ flex:1; padding:8px; background:#0f1320; border:1px solid var(--line); color:var(--text); border-radius:8px; font-size:13px; }}
+.cfg-row button {{ background:#315efb; color:white; border:none; border-radius:8px; padding:8px 12px; cursor:pointer; font-size:13px; white-space:nowrap; }}
+.cfg-row button:hover {{ background:#2563eb; }}
+.muted {{ color:var(--muted); font-style:italic; }}
 .account {{ display:flex; gap:10px; align-items:center; border:1px solid var(--line); padding:8px 10px; border-radius:10px; margin-top:8px; }}
 .account em {{ margin-left:auto; color:#6b7280; }}
 .add-account {{ display:grid; grid-template-columns:1fr 1fr auto; gap:8px; }}
