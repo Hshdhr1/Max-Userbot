@@ -1,4 +1,3 @@
-```
 # Python
 __pycache__/
 *.pyc
@@ -45,6 +44,15 @@ Thumbs.db
 *.swo
 *.tmp
 
+# Userbot runtime data
+max_session.txt
+accounts.json
+userbot_config.json
+sessions/
+modules/*.py
+!modules/examples/
+!modules/examples/**
+
 # Compressed files
 *.zip
 *.gz
@@ -68,4 +76,3 @@ Thumbs.db
 *.tar.bz2
 *.tar.xz
 *.tar.zst
-```

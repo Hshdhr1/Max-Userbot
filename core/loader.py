@@ -5,11 +5,10 @@
 
 import importlib.util
 from pathlib import Path
-from typing import Optional
 
-from userbot import ModuleRegistry, BotModule, ModuleCommand
+from userbot import ModuleRegistry
 
-__all__ = ["ModuleRegistry", "ModuleManager"]
+__all__ = ["ModuleRegistry", "ModuleManager", "get_registry"]
 
 
 class ModuleManager:

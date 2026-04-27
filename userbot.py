@@ -7,7 +7,7 @@ import os
 import random
 import re
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
@@ -56,6 +56,7 @@ class BotModule:
     builtin: bool = True
     hidden: bool = False
     version: str | None = None
+    default_config: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -85,8 +86,21 @@ class ConfigStore:
     def load(self) -> None:
         if not self.path.exists():
             return
-        payload = json.loads(self.path.read_text(encoding="utf-8"))
-        self.data = UserbotConfig(**payload)
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Config file is unreadable, using defaults: %s", exc)
+            return
+        if not isinstance(payload, dict):
+            logger.warning("Config file is not a JSON object, using defaults")
+            return
+        # Drop unknown keys so an older/newer schema doesn't crash startup.
+        known = {f.name for f in fields(UserbotConfig)}
+        filtered = {k: v for k, v in payload.items() if k in known}
+        try:
+            self.data = UserbotConfig(**filtered)
+        except TypeError as exc:
+            logger.warning("Config file has invalid types, using defaults: %s", exc)
 
     def save(self) -> None:
         self.path.write_text(json.dumps(asdict(self.data), ensure_ascii=False, indent=2), encoding="utf-8")
@@ -99,8 +113,24 @@ class AccountStore:
     def load(self) -> list[AccountEntry]:
         if not self.path.exists():
             return []
-        rows = json.loads(self.path.read_text(encoding="utf-8"))
-        return [AccountEntry(**row) for row in rows]
+        try:
+            rows = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Accounts file is unreadable, treating as empty: %s", exc)
+            return []
+        if not isinstance(rows, list):
+            logger.warning("Accounts file is not a list, treating as empty")
+            return []
+        known = {f.name for f in fields(AccountEntry)}
+        result: list[AccountEntry] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                result.append(AccountEntry(**{k: v for k, v in row.items() if k in known}))
+            except TypeError as exc:
+                logger.warning("Skipping invalid account row: %s", exc)
+        return result
 
     def save(self, accounts: list[AccountEntry]) -> None:
         self.path.write_text(json.dumps([asdict(a) for a in accounts], ensure_ascii=False, indent=2), encoding="utf-8")
@@ -267,7 +297,7 @@ class ModuleRegistry:
         return config.module_configs[key]
 
     def render_modules(self) -> str:
-        lines = [f"<b>Система модулей</b>", f"{len(self.available_modules)} модулей доступно, {len(self.hidden_modules)} скрыто:", ""]
+        lines = ["<b>Система модулей</b>", f"{len(self.available_modules)} модулей доступно, {len(self.hidden_modules)} скрыто:", ""]
         for module in self.available_modules:
             suffix = f" ({module.version})" if module.version else ""
             lines.append(f"🪐 <b>{module.name}{suffix}</b>")
@@ -336,8 +366,8 @@ class WebUIManager:
 
     def _module_panel(self, module: BotModule) -> str:
         module_conf = self.config_store.data.module_configs.get(module.name.lower(), {})
-        default_conf = module.default_config or {}
-        
+        default_conf = getattr(module, "default_config", None) or {}
+
         # Объединяем текущий конфиг с дефолтным для отображения
         display_conf = {**default_conf, **module_conf}
         
@@ -481,6 +511,15 @@ body {{ margin:0; background:var(--bg); color:var(--text); font-family:Inter,Ari
         if not label or not phone:
             return web.Response(status=400, text="label and phone are required")
         self.account_store.add_or_update(AccountEntry(label=label, phone=phone, state="pending_auth"))
+        # Также синхронизируем с MultiAccountManager, если он используется в текущем процессе.
+        try:
+            from core.multiaccount import multiaccount_manager  # local import to avoid cycle on bare imports
+            if label not in multiaccount_manager.accounts:
+                from core.multiaccount import AccountEntry as MultiAccountEntry
+                multiaccount_manager.accounts[label] = MultiAccountEntry(label=label, phone=phone)
+                multiaccount_manager._save_accounts()
+        except Exception:  # noqa: BLE001 - синхронизация опциональна
+            logger.debug("MultiAccountManager недоступен для синхронизации", exc_info=True)
         raise web.HTTPFound("/")
 
     async def update_config(self, request: web.Request) -> web.Response:
@@ -494,11 +533,22 @@ body {{ margin:0; background:var(--bg); color:var(--text); font-family:Inter,Ari
         self.config_store.save()
         raise web.HTTPFound("/")
 
+    async def health(self, _: web.Request) -> web.Response:
+        accounts = self.account_store.load()
+        body = {
+            "status": "ok",
+            "uptime_seconds": int(time.time()) - START_TS,
+            "modules": len(self.registry.available_modules),
+            "accounts": len(accounts),
+        }
+        return web.json_response(body)
+
     async def start(self) -> str:
         if self.runner is not None:
             return f"http://{self.host}:{self.port}"
         app = web.Application()
         app.router.add_get("/", self.index)
+        app.router.add_get("/health", self.health)
         app.router.add_post("/api/accounts", self.add_account)
         app.router.add_post("/api/config", self.update_config)
         self.runner = web.AppRunner(app)
@@ -602,6 +652,19 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
         await edit_message(client, destination_chat, message_id, module_registry.render_modules())
         return True
 
+    if cmd == "ping":
+        loop_start = time.perf_counter()
+        await asyncio.sleep(0)
+        loop_ms = (time.perf_counter() - loop_start) * 1000
+        uptime = int(time.time()) - START_TS
+        await edit_message(
+            client,
+            destination_chat,
+            message_id,
+            f"🏓 pong\nLoop latency: <code>{loop_ms:.2f} ms</code>\nUptime: <code>{uptime}s</code>",
+        )
+        return True
+
     if cmd == "help":
         module = module_registry.get_module(arg) if arg else None
         if module:
@@ -627,10 +690,11 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
         return True
 
     if cmd == "setprefix":
-        if not arg:
+        new_prefix = arg.strip()
+        if not new_prefix:
             await edit_message(client, destination_chat, message_id, f"Текущий префикс: <code>{html.escape(config_store.data.prefix)}</code>")
             return True
-        config_store.data.prefix = arg.strip()[0]
+        config_store.data.prefix = new_prefix[0]
         config_store.save()
         await edit_message(client, destination_chat, message_id, f"Префикс обновлён: <code>{html.escape(config_store.data.prefix)}</code>")
         return True
