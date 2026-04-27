@@ -369,138 +369,609 @@ class WebUIManager:
     def _module_panel(self, module: BotModule) -> str:
         module_conf = self.config_store.data.module_configs.get(module.name.lower(), {})
         default_conf = getattr(module, "default_config", None) or {}
-
-        # Объединяем текущий конфиг с дефолтным для отображения
         display_conf = {**default_conf, **module_conf}
-        
-        options_html = ""
+
+        # ----- config form (MD3 filled text fields) ----------------------------
+        rows_html = ""
         for k, v in display_conf.items():
             val = module_conf.get(k, v)
-            options_html += f"""
-            <div class='cfg-row'>
-                <label>{html.escape(k)}</label>
-                <input name='value' value='{html.escape(str(val))}'>
-                <input type='hidden' name='module' value='{html.escape(module.name)}'>
-                <input type='hidden' name='key' value='{html.escape(k)}'>
-                <button type='submit'>Save</button>
-            </div>"""
-        
-        if not options_html:
-            options_html = "<div class='muted'>Нет конфигов (добавь через сообщения или API)</div>"
-        else:
-            options_html = f"<form method='post' action='/api/config'>{options_html}</form>"
+            rows_html += (
+                "<form class='cfg-row' method='post' action='/api/config'>"
+                "<div class='md3-textfield'>"
+                f"<input id='{html.escape(module.name)}-{html.escape(k)}' "
+                f"name='value' value='{html.escape(str(val))}' placeholder=' ' autocomplete='off'>"
+                f"<label for='{html.escape(module.name)}-{html.escape(k)}'>{html.escape(k)}</label>"
+                "</div>"
+                f"<input type='hidden' name='module' value='{html.escape(module.name)}'>"
+                f"<input type='hidden' name='key' value='{html.escape(k)}'>"
+                "<button type='submit' class='md3-btn md3-btn--tonal'>"
+                "<span class='material-symbols-outlined'>save</span>Save</button>"
+                "</form>"
+            )
+        cfg_html = (
+            rows_html
+            if rows_html
+            else "<p class='md3-empty'>Нет конфигов — добавь через <code>.cfg &lt;module&gt; &lt;key&gt; &lt;value&gt;</code> или API.</p>"
+        )
 
-        # Документация модуля
-        doc_html = ""
-        if module.description:
-            doc_html = f"<div class='module-doc'><p>{html.escape(module.description)}</p></div>"
-        
-        commands_doc = ""
+        # ----- description -----------------------------------------------------
+        doc_html = (
+            f"<p class='md3-card__support'>{html.escape(module.description)}</p>"
+            if module.description
+            else ""
+        )
+
+        # ----- commands chips --------------------------------------------------
+        commands_html = ""
         if module.commands:
-            commands_doc = "<div class='commands-list'><h4>Команды:</h4><ul>"
+            chips = ""
             for cmd in module.commands:
-                aliases = f" ({', '.join(cmd.aliases)})" if cmd.aliases else ""
-                commands_doc += f"<li><code>.{cmd.name}{aliases}</code> — {html.escape(cmd.description)}</li>"
-            commands_doc += "</ul></div>"
+                aliases = (
+                    f" <span class='md3-chip__sub'>· {html.escape(', '.join('.' + a for a in cmd.aliases))}</span>"
+                    if cmd.aliases
+                    else ""
+                )
+                chips += (
+                    "<li class='md3-chip' "
+                    f"title='{html.escape(cmd.description)}'>"
+                    f"<code>.{html.escape(cmd.name)}</code>{aliases}"
+                    "</li>"
+                )
+            commands_html = (
+                "<details class='md3-details'>"
+                f"<summary>Команды ({len(module.commands)})</summary>"
+                f"<ul class='md3-chips'>{chips}</ul>"
+                "</details>"
+            )
+
+        kind_badge = (
+            "<span class='md3-badge md3-badge--builtin'>builtin</span>"
+            if module.builtin
+            else "<span class='md3-badge md3-badge--external'>external</span>"
+        )
 
         return (
-            "<section class='module-card'>"
-            f"<h3>{html.escape(module.name)}</h3>"
+            "<article class='md3-card md3-card--filled'>"
+            "<header class='md3-card__header'>"
+            f"<h3 class='md3-card__title'>{html.escape(module.name)}</h3>"
+            f"{kind_badge}"
+            "</header>"
             f"{doc_html}"
-            f"{commands_doc}"
-            f"<h4>Конфигурация:</h4>"
-            f"{options_html}"
-            "</section>"
+            f"{commands_html}"
+            "<h4 class='md3-card__section'>Конфигурация</h4>"
+            f"<div class='md3-card__cfg'>{cfg_html}</div>"
+            "</article>"
         )
 
-    async def index(self, _: web.Request) -> web.Response:
-        modules_nav = "".join(
-            f"<li>{html.escape(m.name)} <span>{len(m.commands)}</span></li>" for m in self.registry.available_modules
+    @staticmethod
+    def _md3_css() -> str:
+        """Material Design 3 / Material You CSS (tokens + components)."""
+        return """
+:root {
+  --md-sys-typescale-display: 600 28px/36px Roboto, Arial, sans-serif;
+  --md-sys-typescale-title:   500 16px/24px Roboto, Arial, sans-serif;
+  --md-sys-typescale-body:    400 14px/20px Roboto, Arial, sans-serif;
+  --md-sys-typescale-label:   500 12px/16px Roboto, Arial, sans-serif;
+  --md-sys-state-hover: rgba(103, 80, 164, 0.08);
+  --md-sys-state-press: rgba(103, 80, 164, 0.16);
+  --md-sys-radius-xs: 4px;
+  --md-sys-radius-sm: 8px;
+  --md-sys-radius-md: 12px;
+  --md-sys-radius-lg: 16px;
+  --md-sys-radius-xl: 28px;
+  --md-elev-1: 0 1px 3px rgba(0,0,0,.30), 0 1px 2px rgba(0,0,0,.15);
+  --md-elev-2: 0 2px 6px rgba(0,0,0,.30), 0 1px 2px rgba(0,0,0,.15);
+}
+:root[data-theme="light"] {
+  --md-sys-color-primary: #6750A4;
+  --md-sys-color-on-primary: #FFFFFF;
+  --md-sys-color-primary-container: #EADDFF;
+  --md-sys-color-on-primary-container: #21005D;
+  --md-sys-color-secondary-container: #E8DEF8;
+  --md-sys-color-on-secondary-container: #1D192B;
+  --md-sys-color-tertiary-container: #FFD8E4;
+  --md-sys-color-on-tertiary-container: #31111D;
+  --md-sys-color-background: #FEF7FF;
+  --md-sys-color-on-background: #1D1B20;
+  --md-sys-color-surface: #FEF7FF;
+  --md-sys-color-surface-container: #F3EDF7;
+  --md-sys-color-surface-container-high: #ECE6F0;
+  --md-sys-color-surface-container-highest: #E6E0E9;
+  --md-sys-color-on-surface: #1D1B20;
+  --md-sys-color-on-surface-variant: #49454F;
+  --md-sys-color-outline: #79747E;
+  --md-sys-color-outline-variant: #CAC4D0;
+  --md-sys-color-error: #B3261E;
+  --md-sys-color-success: #146C2E;
+}
+:root[data-theme="dark"] {
+  --md-sys-color-primary: #D0BCFF;
+  --md-sys-color-on-primary: #381E72;
+  --md-sys-color-primary-container: #4F378B;
+  --md-sys-color-on-primary-container: #EADDFF;
+  --md-sys-color-secondary-container: #4A4458;
+  --md-sys-color-on-secondary-container: #E8DEF8;
+  --md-sys-color-tertiary-container: #633B48;
+  --md-sys-color-on-tertiary-container: #FFD8E4;
+  --md-sys-color-background: #141218;
+  --md-sys-color-on-background: #E6E1E5;
+  --md-sys-color-surface: #141218;
+  --md-sys-color-surface-container: #1D1B20;
+  --md-sys-color-surface-container-high: #2B2930;
+  --md-sys-color-surface-container-highest: #36343B;
+  --md-sys-color-on-surface: #E6E1E5;
+  --md-sys-color-on-surface-variant: #CAC4D0;
+  --md-sys-color-outline: #938F99;
+  --md-sys-color-outline-variant: #49454F;
+  --md-sys-color-error: #F2B8B5;
+  --md-sys-color-success: #74D690;
+}
+
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  padding: 0;
+  font: var(--md-sys-typescale-body);
+  background: var(--md-sys-color-background);
+  color: var(--md-sys-color-on-background);
+  min-height: 100vh;
+  transition: background-color 200ms ease, color 200ms ease;
+}
+code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospace; }
+
+/* ---- top app bar ------------------------------------------------------- */
+.md3-app-bar {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; align-items: center; gap: 16px;
+  padding: 12px 24px;
+  background: var(--md-sys-color-surface-container);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  backdrop-filter: saturate(1.2);
+}
+.md3-app-bar__lead { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.md3-app-bar__icon {
+  font-size: 28px;
+  color: var(--md-sys-color-primary);
+  background: var(--md-sys-color-primary-container);
+  border-radius: 999px; padding: 8px;
+}
+.md3-app-bar__title { margin: 0; font: var(--md-sys-typescale-display); }
+.md3-app-bar__subtitle {
+  margin: 0; color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-typescale-label);
+}
+.md3-app-bar__stats { display: flex; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+.md3-stat {
+  display: inline-flex; flex-direction: column; align-items: flex-end;
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+  border-radius: var(--md-sys-radius-md); padding: 6px 12px; min-width: 80px;
+}
+.md3-stat b { font: var(--md-sys-typescale-title); }
+.md3-stat small { font: var(--md-sys-typescale-label); opacity: .8; }
+.md3-app-bar__actions { display: flex; gap: 4px; }
+.md3-iconbtn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 40px; height: 40px; border-radius: 999px;
+  background: transparent; border: none; cursor: pointer;
+  color: var(--md-sys-color-on-surface-variant);
+  text-decoration: none;
+  transition: background-color 120ms ease;
+}
+.md3-iconbtn:hover { background: var(--md-sys-state-hover); }
+.md3-iconbtn:active { background: var(--md-sys-state-press); }
+
+/* ---- shell layout ------------------------------------------------------ */
+.md3-shell {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: 24px; padding: 24px;
+  max-width: 1480px; margin: 0 auto;
+}
+@media (max-width: 900px) {
+  .md3-shell { grid-template-columns: 1fr; }
+  .md3-rail { position: relative !important; max-height: none !important; }
+}
+
+/* ---- navigation rail --------------------------------------------------- */
+.md3-rail {
+  position: sticky; top: 88px;
+  align-self: start;
+  background: var(--md-sys-color-surface-container);
+  border-radius: var(--md-sys-radius-xl);
+  padding: 16px;
+  max-height: calc(100vh - 110px);
+  display: flex; flex-direction: column; gap: 12px;
+  overflow: hidden;
+}
+.md3-rail__list {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 4px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+.md3-rail__list::-webkit-scrollbar { width: 6px; }
+.md3-rail__list::-webkit-scrollbar-thumb {
+  background: var(--md-sys-color-outline-variant); border-radius: 3px;
+}
+.md3-rail__item {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px; border-radius: 999px;
+  cursor: pointer; user-select: none;
+  color: var(--md-sys-color-on-surface);
+  font: var(--md-sys-typescale-label); font-size: 14px;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+.md3-rail__item:hover { background: var(--md-sys-state-hover); }
+.md3-rail__item:active { background: var(--md-sys-state-press); }
+.md3-rail__count {
+  background: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+  border-radius: 999px; padding: 2px 10px; font-size: 12px;
+}
+
+/* ---- text fields (filled MD3) ----------------------------------------- */
+.md3-textfield {
+  position: relative; flex: 1;
+  background: var(--md-sys-color-surface-container-highest);
+  border-radius: var(--md-sys-radius-xs) var(--md-sys-radius-xs) 0 0;
+  border-bottom: 1px solid var(--md-sys-color-outline);
+  transition: border-color 120ms ease;
+  min-width: 160px;
+}
+.md3-textfield:focus-within { border-bottom-color: var(--md-sys-color-primary); }
+.md3-textfield input {
+  width: 100%; padding: 22px 12px 8px;
+  background: transparent; border: none; outline: none;
+  color: var(--md-sys-color-on-surface);
+  font: var(--md-sys-typescale-body); font-size: 14px;
+}
+.md3-textfield label {
+  position: absolute; left: 12px; top: 16px;
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-typescale-body); pointer-events: none;
+  transition: top 120ms ease, font-size 120ms ease, color 120ms ease;
+}
+.md3-textfield input:focus + label,
+.md3-textfield input:not(:placeholder-shown) + label {
+  top: 4px; font-size: 11px; color: var(--md-sys-color-primary);
+}
+
+/* ---- buttons ---------------------------------------------------------- */
+.md3-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  border: none; cursor: pointer;
+  font: var(--md-sys-typescale-label); font-size: 14px;
+  padding: 10px 24px; border-radius: 999px;
+  transition: background-color 120ms ease, box-shadow 120ms ease;
+  white-space: nowrap;
+}
+.md3-btn .material-symbols-outlined { font-size: 18px; }
+.md3-btn--filled {
+  background: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
+}
+.md3-btn--filled:hover { box-shadow: var(--md-elev-1); filter: brightness(1.05); }
+.md3-btn--tonal {
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+  padding: 8px 16px;
+}
+.md3-btn--tonal:hover { filter: brightness(1.05); }
+.md3-btn--outlined {
+  background: transparent;
+  color: var(--md-sys-color-primary);
+  border: 1px solid var(--md-sys-color-outline);
+  padding: 8px 16px;
+}
+.md3-btn--outlined:hover { background: var(--md-sys-state-hover); }
+
+/* ---- sections / cards -------------------------------------------------- */
+.md3-section { display: flex; flex-direction: column; gap: 12px; margin-bottom: 32px; }
+.md3-section__header h2 {
+  margin: 0; font: var(--md-sys-typescale-display); font-size: 22px;
+  display: flex; align-items: center; gap: 10px;
+  color: var(--md-sys-color-on-surface);
+}
+.md3-section__header .material-symbols-outlined {
+  font-size: 22px; color: var(--md-sys-color-primary);
+}
+.md3-card {
+  background: var(--md-sys-color-surface-container);
+  border-radius: var(--md-sys-radius-lg);
+  padding: 20px; transition: box-shadow 200ms ease, transform 200ms ease;
+}
+.md3-card--elevated { box-shadow: var(--md-elev-1); }
+.md3-card--elevated:hover { box-shadow: var(--md-elev-2); }
+.md3-card--filled { background: var(--md-sys-color-surface-container-high); }
+.md3-card--filled:hover { transform: translateY(-1px); box-shadow: var(--md-elev-1); }
+.md3-card-grid {
+  display: grid; gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+}
+.md3-card__header {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  margin-bottom: 8px;
+}
+.md3-card__title { margin: 0; font: var(--md-sys-typescale-title); font-size: 18px; }
+.md3-card__support { color: var(--md-sys-color-on-surface-variant); margin: 4px 0 16px; }
+.md3-card__section {
+  margin: 16px 0 8px;
+  font: var(--md-sys-typescale-label);
+  text-transform: uppercase; letter-spacing: .5px;
+  color: var(--md-sys-color-on-surface-variant);
+}
+.md3-card__cfg { display: flex; flex-direction: column; gap: 12px; }
+.md3-empty {
+  margin: 8px 0; padding: 12px;
+  background: var(--md-sys-color-surface-container-highest);
+  border-radius: var(--md-sys-radius-sm);
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-typescale-body); font-style: italic;
+}
+.md3-empty code {
+  background: var(--md-sys-color-surface-container);
+  padding: 2px 6px; border-radius: 4px; color: var(--md-sys-color-primary);
+}
+
+/* ---- chips / commands -------------------------------------------------- */
+.md3-details summary {
+  cursor: pointer; padding: 6px 0;
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-typescale-label); font-size: 13px;
+}
+.md3-chips {
+  list-style: none; margin: 8px 0 0; padding: 0;
+  display: flex; flex-wrap: wrap; gap: 6px;
+}
+.md3-chip {
+  background: var(--md-sys-color-surface-container-highest);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: 8px; padding: 4px 10px;
+  font-size: 12px; color: var(--md-sys-color-on-surface);
+}
+.md3-chip code { color: var(--md-sys-color-primary); }
+.md3-chip__sub { color: var(--md-sys-color-on-surface-variant); }
+
+/* ---- forms ------------------------------------------------------------- */
+.md3-form { display: flex; flex-direction: column; gap: 12px; margin-bottom: 16px; }
+.md3-form--inline {
+  flex-direction: row; align-items: stretch; flex-wrap: wrap;
+}
+.cfg-row {
+  display: flex; align-items: stretch; gap: 8px; flex-wrap: wrap;
+}
+.cfg-row .md3-textfield { min-width: 220px; }
+
+/* ---- list rows --------------------------------------------------------- */
+.md3-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.md3-list__row {
+  display: flex; align-items: center; gap: 14px;
+  padding: 12px 8px; border-radius: var(--md-sys-radius-md);
+  transition: background-color 120ms ease;
+}
+.md3-list__row:hover { background: var(--md-sys-state-hover); }
+.md3-list__avatar {
+  font-size: 32px; color: var(--md-sys-color-primary);
+}
+.md3-list__primary { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.md3-list__title { font: var(--md-sys-typescale-title); font-size: 15px; }
+.md3-list__support { color: var(--md-sys-color-on-surface-variant); font-size: 13px; }
+.md3-list__empty { padding: 16px; text-align: center; }
+
+/* ---- badge ------------------------------------------------------------- */
+.md3-badge {
+  display: inline-block; padding: 2px 10px; border-radius: 999px;
+  font: var(--md-sys-typescale-label); font-size: 11px; letter-spacing: .3px;
+}
+.md3-badge--builtin {
+  background: color-mix(in srgb, var(--md-sys-color-success) 18%, transparent);
+  color: var(--md-sys-color-success);
+}
+.md3-badge--external {
+  background: var(--md-sys-color-tertiary-container);
+  color: var(--md-sys-color-on-tertiary-container);
+}
+
+/* ---- snackbar ---------------------------------------------------------- */
+.md3-snackbar {
+  position: fixed; bottom: -80px; left: 50%; transform: translateX(-50%);
+  background: var(--md-sys-color-on-surface);
+  color: var(--md-sys-color-surface);
+  padding: 14px 24px; border-radius: var(--md-sys-radius-xs);
+  font: var(--md-sys-typescale-body); font-size: 14px;
+  box-shadow: var(--md-elev-2);
+  transition: bottom 220ms ease;
+  pointer-events: none;
+  z-index: 100;
+}
+.md3-snackbar--open { bottom: 32px; }
+"""
+
+    async def index(self, request: web.Request) -> web.Response:
+        modules = self.registry.available_modules
+        cards = "".join(self._module_panel(m) for m in modules)
+
+        rail_items = "".join(
+            f"<li class='md3-rail__item' data-module='{html.escape(m.name)}'>"
+            f"<span class='md3-rail__name'>{html.escape(m.name)}</span>"
+            f"<span class='md3-rail__count'>{len(m.commands)}</span>"
+            "</li>"
+            for m in modules
         )
-        cards = "".join(self._module_panel(m) for m in self.registry.available_modules)
 
         accounts = self.account_store.load()
-        accounts_html = "".join(
-            f"<div class='account'><b>{html.escape(a.label)}</b><small>{html.escape(a.phone)}</small><em>{html.escape(a.state)}</em></div>"
-            for a in accounts
-        ) or "<div class='account muted'>Нет подключённых аккаунтов</div>"
+        if accounts:
+            accounts_html = "".join(
+                "<li class='md3-list__row'>"
+                "<span class='md3-list__avatar material-symbols-outlined'>account_circle</span>"
+                "<div class='md3-list__primary'>"
+                f"<div class='md3-list__title'>{html.escape(a.label)}</div>"
+                f"<div class='md3-list__support'>{html.escape(a.phone)}</div>"
+                "</div>"
+                f"<span class='md3-badge md3-badge--{ 'builtin' if a.state == 'authorized' else 'external'}'>"
+                f"{html.escape(a.state)}</span>"
+                "</li>"
+                for a in accounts
+            )
+        else:
+            accounts_html = "<li class='md3-empty md3-list__empty'>Нет подключённых аккаунтов.</li>"
 
         uptime = int(time.time()) - START_TS
-        html_page = f"""
-<!doctype html>
+        saved = request.query.get("saved")
+        snackbar_text = ""
+        if saved == "config":
+            snackbar_text = "Конфиг сохранён"
+        elif saved == "account":
+            snackbar_text = "Аккаунт добавлен"
+
+        html_page = f"""<!doctype html>
 <html lang='ru'>
 <head>
 <meta charset='utf-8'>
-<title>Max Userbot Web UI</title>
-<style>
-:root {{ --bg:#0d0f17; --card:#141826; --line:#252d42; --text:#eef2ff; --muted:#8d97b5; --accent:#16a34a; }}
-* {{ box-sizing:border-box; }}
-body {{ margin:0; background:var(--bg); color:var(--text); font-family:Inter,Arial,sans-serif; }}
-.layout {{ display:grid; grid-template-columns:280px 1fr; min-height:100vh; }}
-.sidebar {{ border-right:1px solid var(--line); padding:18px; background:#111521; }}
-.brand {{ font-size:26px; font-weight:800; margin-bottom:14px; }}
-.search {{ width:100%; padding:10px 12px; background:#0f1320; border:1px solid var(--line); border-radius:12px; color:var(--text); }}
-.sidebar ul {{ list-style:none; padding:0; margin:14px 0 0; }}
-.sidebar li {{ display:flex; justify-content:space-between; padding:10px 8px; border-radius:10px; }}
-.sidebar li:hover {{ background:#171d2d; }}
-.main {{ padding:22px; }}
-.stats {{ display:grid; grid-template-columns:repeat(3,minmax(180px,1fr)); gap:12px; margin-bottom:14px; }}
-.stat {{ background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; }}
-.stat h2 {{ margin:0; font-size:30px; color:#20d38a; }}
-.accounts, .modules {{ background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; margin-top:12px; }}
-.module-grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); gap:14px; }}
-.module-card {{ background:#101523; border:1px solid var(--line); border-radius:12px; padding:16px; }}
-.module-card h3 {{ margin:0 0 8px; font-size:18px; color:#fff; }}
-.module-card h4 {{ margin:14px 0 8px; font-size:14px; color:#8d97b5; text-transform:uppercase; letter-spacing:0.5px; }}
-.module-doc {{ background:#0f1320; border-radius:8px; padding:10px; margin:8px 0; }}
-.module-doc p {{ margin:0; color:#c7d2fe; line-height:1.5; }}
-.commands-list {{ margin:8px 0; }}
-.commands-list ul {{ list-style:none; padding:0; margin:0; }}
-.commands-list li {{ padding:6px 0; border-bottom:1px solid #1f2937; font-size:13px; }}
-.commands-list li:last-child {{ border-bottom:none; }}
-.commands-list code {{ background:#1f2937; padding:2px 6px; border-radius:4px; color:#60a5fa; font-family:'Consolas','Monaco',monospace; font-size:12px; }}
-.cfg-row {{ display:flex; gap:8px; margin-top:8px; align-items:center; }}
-.cfg-row label {{ min-width:120px; font-size:13px; color:#a5b4fc; }}
-.cfg-row input {{ flex:1; padding:8px; background:#0f1320; border:1px solid var(--line); color:var(--text); border-radius:8px; font-size:13px; }}
-.cfg-row button {{ background:#315efb; color:white; border:none; border-radius:8px; padding:8px 12px; cursor:pointer; font-size:13px; white-space:nowrap; }}
-.cfg-row button:hover {{ background:#2563eb; }}
-.muted {{ color:var(--muted); font-style:italic; }}
-.account {{ display:flex; gap:10px; align-items:center; border:1px solid var(--line); padding:8px 10px; border-radius:10px; margin-top:8px; }}
-.account em {{ margin-left:auto; color:#6b7280; }}
-.add-account {{ display:grid; grid-template-columns:1fr 1fr auto; gap:8px; }}
-.add-account input {{ padding:8px; border-radius:8px; border:1px solid var(--line); background:#0f1320; color:var(--text); }}
-</style>
+<meta name='viewport' content='width=device-width, initial-scale=1'>
+<meta name='theme-color' content='#1d192b' media='(prefers-color-scheme: dark)'>
+<meta name='theme-color' content='#fef7ff' media='(prefers-color-scheme: light)'>
+<title>Max Userbot · Console</title>
+<link rel='preconnect' href='https://fonts.googleapis.com'>
+<link rel='preconnect' href='https://fonts.gstatic.com' crossorigin>
+<link rel='stylesheet'
+      href='https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Roboto+Mono&display=swap'>
+<link rel='stylesheet'
+      href='https://fonts.googleapis.com/icon?family=Material+Symbols+Outlined'>
+<style>{self._md3_css()}</style>
 </head>
 <body>
-<div class='layout'>
-  <aside class='sidebar'>
-    <div class='brand'>Maxli</div>
-    <input class='search' placeholder='Поиск модулей...'>
-    <ul>{modules_nav}</ul>
-  </aside>
-  <main class='main'>
-    <section class='stats'>
-      <div class='stat'><div>Активные клиенты</div><h2>{max(len(accounts), 1)}</h2></div>
-      <div class='stat'><div>Загруженные модули</div><h2>{len(self.registry.available_modules)}</h2></div>
-      <div class='stat'><div>Uptime</div><h2>{uptime}s</h2></div>
+<header class='md3-app-bar'>
+  <div class='md3-app-bar__lead'>
+    <span class='material-symbols-outlined md3-app-bar__icon'>terminal</span>
+    <div>
+      <h1 class='md3-app-bar__title'>Max&nbsp;Userbot</h1>
+      <p class='md3-app-bar__subtitle'>Console · Material You</p>
+    </div>
+  </div>
+  <div class='md3-app-bar__stats'>
+    <span class='md3-stat'><b>{len(modules)}</b><small>модулей</small></span>
+    <span class='md3-stat'><b>{len(accounts)}</b><small>аккаунтов</small></span>
+    <span class='md3-stat'><b>{uptime}s</b><small>uptime</small></span>
+  </div>
+  <div class='md3-app-bar__actions'>
+    <button id='md3-theme-toggle' class='md3-iconbtn' aria-label='Переключить тему'>
+      <span class='material-symbols-outlined'>dark_mode</span>
+    </button>
+    <a class='md3-iconbtn' href='/health' target='_blank' aria-label='Health check'>
+      <span class='material-symbols-outlined'>monitor_heart</span>
+    </a>
+  </div>
+</header>
+
+<div class='md3-shell'>
+  <nav class='md3-rail' aria-label='Модули'>
+    <div class='md3-rail__search md3-textfield'>
+      <input id='md3-search' placeholder=' ' autocomplete='off'>
+      <label for='md3-search'>Поиск модулей</label>
+    </div>
+    <ul class='md3-rail__list'>{rail_items}</ul>
+  </nav>
+
+  <main class='md3-main'>
+    <section class='md3-section' id='accounts'>
+      <header class='md3-section__header'>
+        <h2><span class='material-symbols-outlined'>person</span>Аккаунты</h2>
+      </header>
+      <article class='md3-card md3-card--elevated'>
+        <form class='md3-form md3-form--inline' method='post' action='/api/accounts'>
+          <div class='md3-textfield'>
+            <input id='acc-label' name='label' placeholder=' ' autocomplete='off' required>
+            <label for='acc-label'>Метка (например, main)</label>
+          </div>
+          <div class='md3-textfield'>
+            <input id='acc-phone' name='phone' placeholder=' ' autocomplete='off' required>
+            <label for='acc-phone'>Телефон, +79990000000</label>
+          </div>
+          <button type='submit' class='md3-btn md3-btn--filled'>
+            <span class='material-symbols-outlined'>add</span>Добавить
+          </button>
+        </form>
+        <ul class='md3-list'>{accounts_html}</ul>
+      </article>
     </section>
 
-    <section class='accounts'>
-      <h2>Подключенные аккаунты</h2>
-      <form class='add-account' method='post' action='/api/accounts'>
-        <input name='label' placeholder='label (main)'>
-        <input name='phone' placeholder='+79990000000'>
-        <button type='submit'>Добавить</button>
-      </form>
-      {accounts_html}
-    </section>
-
-    <section class='modules'>
-      <h2>Модули / конфиги</h2>
-      <div class='module-grid'>{cards}</div>
+    <section class='md3-section' id='modules'>
+      <header class='md3-section__header'>
+        <h2><span class='material-symbols-outlined'>extension</span>Модули и конфиги</h2>
+      </header>
+      <div class='md3-card-grid' id='md3-cards'>{cards}</div>
     </section>
   </main>
 </div>
+
+<div id='md3-snackbar' class='md3-snackbar' role='status' aria-live='polite'></div>
+
+<script>
+(function() {{
+  // ---- Material You theme toggle (light / dark) ----
+  const KEY = 'md3-theme';
+  const root = document.documentElement;
+  const saved = localStorage.getItem(KEY);
+  const sysDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  if (saved) root.setAttribute('data-theme', saved);
+  else root.setAttribute('data-theme', sysDark ? 'dark' : 'light');
+
+  const btn = document.getElementById('md3-theme-toggle');
+  const updateIcon = () => {{
+    const dark = root.getAttribute('data-theme') === 'dark';
+    btn.querySelector('.material-symbols-outlined').textContent = dark ? 'light_mode' : 'dark_mode';
+  }};
+  updateIcon();
+  btn.addEventListener('click', () => {{
+    const next = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+    root.setAttribute('data-theme', next);
+    localStorage.setItem(KEY, next);
+    updateIcon();
+  }});
+
+  // ---- module search filter (rail + cards) ----
+  const search = document.getElementById('md3-search');
+  const rail = document.querySelectorAll('.md3-rail__item');
+  const cards = document.querySelectorAll('.md3-card.md3-card--filled');
+  search.addEventListener('input', () => {{
+    const q = search.value.trim().toLowerCase();
+    rail.forEach(el => {{
+      const m = el.dataset.module.toLowerCase();
+      el.style.display = (!q || m.includes(q)) ? '' : 'none';
+    }});
+    cards.forEach(card => {{
+      const title = card.querySelector('.md3-card__title');
+      const t = title ? title.textContent.trim().toLowerCase() : '';
+      card.style.display = (!q || t.includes(q)) ? '' : 'none';
+    }});
+  }});
+
+  // smooth scroll when clicking a rail item
+  rail.forEach(el => {{
+    el.addEventListener('click', () => {{
+      const name = el.dataset.module;
+      const card = Array.from(cards).find(c => {{
+        const t = c.querySelector('.md3-card__title');
+        return t && t.textContent.trim() === name;
+      }});
+      if (card) card.scrollIntoView({{behavior: 'smooth', block: 'start'}});
+    }});
+  }});
+
+  // ---- snackbar ----
+  const snack = document.getElementById('md3-snackbar');
+  const showSnack = (text) => {{
+    if (!text) return;
+    snack.textContent = text;
+    snack.classList.add('md3-snackbar--open');
+    clearTimeout(showSnack._t);
+    showSnack._t = setTimeout(() => snack.classList.remove('md3-snackbar--open'), 2400);
+  }};
+  showSnack({snackbar_text!r});
+}})();
+</script>
 </body>
 </html>
 """
@@ -522,7 +993,7 @@ body {{ margin:0; background:var(--bg); color:var(--text); font-family:Inter,Ari
                 multiaccount_manager._save_accounts()
         except Exception:  # noqa: BLE001 - синхронизация опциональна
             logger.debug("MultiAccountManager недоступен для синхронизации", exc_info=True)
-        raise web.HTTPFound("/")
+        raise web.HTTPFound("/?saved=account")
 
     async def update_config(self, request: web.Request) -> web.Response:
         data = await request.post()
@@ -533,7 +1004,7 @@ body {{ margin:0; background:var(--bg); color:var(--text); font-family:Inter,Ari
             return web.Response(status=400, text="module and key are required")
         self.registry.module_config(self.config_store.data, module)[key] = value
         self.config_store.save()
-        raise web.HTTPFound("/")
+        raise web.HTTPFound("/?saved=config")
 
     async def health(self, _: web.Request) -> web.Response:
         accounts = self.account_store.load()
