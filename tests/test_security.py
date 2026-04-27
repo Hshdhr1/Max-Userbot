@@ -75,6 +75,11 @@ class DangerousFlagTests(unittest.TestCase):
             self.assertTrue(is_dangerous(cmd), cmd)
             self.assertTrue(is_dangerous(cmd.upper()))
 
+    def test_aliases_dangerous(self):
+        # Алиасы команд загрузки модулей не должны обходить unlock-проверку.
+        for cmd in ("lm", "dlmod", "ulm", "unloadmod"):
+            self.assertTrue(is_dangerous(cmd), cmd)
+
     def test_unknown_safe(self):
         for cmd in ("ping", "modules", "help", "config"):
             self.assertFalse(is_dangerous(cmd), cmd)
@@ -83,6 +88,8 @@ class DangerousFlagTests(unittest.TestCase):
         # Защищаемся от случайных регрессий.
         self.assertIn("eval", DANGEROUS_COMMANDS)
         self.assertIn("terminal", DANGEROUS_COMMANDS)
+        self.assertIn("loadmod", DANGEROUS_COMMANDS)
+        self.assertIn("lm", DANGEROUS_COMMANDS)
 
 
 if __name__ == "__main__":

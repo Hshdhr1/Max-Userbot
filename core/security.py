@@ -147,8 +147,14 @@ DANGEROUS_COMMANDS: set[str] = {
     "terminal",
     "shell",
     "sh",
+    # download / load / unload module — все алиасы должны быть здесь, иначе
+    # `.lm` / `.dlmod` / `.ulm` обходят unlock-проверку.
     "dlm",
+    "dlmod",
     "loadmod",
+    "lm",
+    "unloadmod",
+    "ulm",
     "installmod",
     "uninstallmod",
     "rmmod",

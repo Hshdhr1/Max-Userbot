@@ -1494,29 +1494,40 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
   }});
 
   // ---- catalog ----
+  // catalog.json может тянуться с произвольного MAX_CATALOG_URL — нельзя
+  // доверять полям. Все строки экранируем перед вставкой в HTML/атрибуты.
+  const escHtml = (s) => String(s == null ? '' : s).replace(
+    /[&<>"']/g,
+    (c) => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c])
+  );
+
   const renderCard = (mod) => {{
     const card = document.createElement('article');
     card.className = 'md3-catalog__card';
-    const tags = (mod.tags || []).map(t => `<span class="md3-catalog__tag">${{t}}</span>`).join('');
+    const safeName = escHtml(mod.name);
+    const safeVersion = escHtml(mod.version);
+    const safeAuthor = escHtml(mod.author);
+    const safeDesc = escHtml(mod.description);
+    const tags = (mod.tags || []).map(t => `<span class="md3-catalog__tag">${{escHtml(t)}}</span>`).join('');
     const badge = mod.installed
       ? '<span class="md3-badge md3-badge--installed"><span class="material-symbols-outlined" style="font-size:14px">check_circle</span>Установлен</span>'
       : '<span class="md3-badge md3-badge--available">Доступен</span>';
     card.innerHTML = `
       <div class='md3-catalog__head'>
         <div>
-          <h3 class='md3-catalog__title'>${{mod.name}}</h3>
-          <div class='md3-catalog__meta'>v${{mod.version}}${{mod.author ? ' · ' + mod.author : ''}}</div>
+          <h3 class='md3-catalog__title'>${{safeName}}</h3>
+          <div class='md3-catalog__meta'>v${{safeVersion}}${{safeAuthor ? ' · ' + safeAuthor : ''}}</div>
         </div>
         ${{badge}}
       </div>
-      <p class='md3-catalog__desc'>${{mod.description || ''}}</p>
+      <p class='md3-catalog__desc'>${{safeDesc}}</p>
       <div class='md3-catalog__tags'>${{tags}}</div>
       <div class='md3-catalog__actions'>
-        <button class='md3-btn md3-btn--filled' data-action='install' data-name='${{mod.name}}' ${{mod.installed ? 'disabled' : ''}}>
+        <button class='md3-btn md3-btn--filled' data-action='install' data-name='${{safeName}}' ${{mod.installed ? 'disabled' : ''}}>
           <span class='material-symbols-outlined'>download</span><span>${{mod.installed ? 'Установлено' : 'Установить'}}</span>
         </button>
         ${{mod.installed
-          ? `<button class='md3-btn md3-btn--text' data-action='uninstall' data-name='${{mod.name}}'><span class='material-symbols-outlined'>delete</span><span>Удалить</span></button>`
+          ? `<button class='md3-btn md3-btn--text' data-action='uninstall' data-name='${{safeName}}'><span class='material-symbols-outlined'>delete</span><span>Удалить</span></button>`
           : ''}}
       </div>
     `;
@@ -1961,9 +1972,16 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
             await edit_message(client, destination_chat, message_id, "Использование: <code>.unlock &lt;пароль&gt;</code>")
             return True
         if verify_password(arg, config_store.data.dangerous_password_hash, config_store.data.dangerous_password_salt):
-            _TG_UNLOCKED["default"] = time.time() + 600
-            await edit_message(client, destination_chat, message_id, "🔓 Сессия открыта на 10 минут.")
-            logger.info("Dangerous-actions сессия открыта (Telegram).")
+            ttl = session_manager.ttl
+            _TG_UNLOCKED["default"] = time.time() + ttl
+            minutes = max(1, ttl // 60)
+            await edit_message(
+                client,
+                destination_chat,
+                message_id,
+                f"🔓 Сессия открыта на {minutes} мин.",
+            )
+            logger.info("Dangerous-actions сессия открыта (Telegram, TTL=%ss).", ttl)
         else:
             await edit_message(client, destination_chat, message_id, "❌ Неверный пароль.")
             logger.warning("Неверный пароль .unlock от Telegram.")
