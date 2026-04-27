@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import inspect
 import json
 import logging
 from dataclasses import asdict, dataclass
@@ -226,7 +227,9 @@ class MultiAccountManager:
             if callable(method):
                 try:
                     result = method()
-                    if asyncio.iscoroutine(result):
+                    # Любой awaitable: coroutine, asyncio.Future, Task, или
+                    # сторонние объекты с __await__ — все должны дождаться.
+                    if inspect.isawaitable(result):
                         await result
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(f"[{label}] Ошибка при закрытии клиента: {exc}")

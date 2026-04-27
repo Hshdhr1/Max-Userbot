@@ -19,6 +19,15 @@
       "filename": "keyscanner_example.py",
       "url": "https://raw.githubusercontent.com/Hshdhr1/Max-Userbot/main/modules/examples/keyscanner_example.py",
       "tags": ["security", "example", "scanner"]
+    },
+    {
+      "name": "SiteDump",
+      "description": ".sdump <url> — рендерит страницу в PDF (playwright / weasyprint), публикует на 0x0.st и присылает ссылку в чат.",
+      "version": "1.0",
+      "author": "Max-Userbot",
+      "filename": "site_dump.py",
+      "url": "https://raw.githubusercontent.com/Hshdhr1/Max-Userbot/main/modules/examples/site_dump.py",
+      "tags": ["pdf", "render", "tools"]
     }
   ]
 }
