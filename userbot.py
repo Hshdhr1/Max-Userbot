@@ -14,12 +14,21 @@ from typing import Any, Awaitable, Callable, Optional
 import aiohttp
 from aiohttp import web
 from vkmax.client import MaxClient
-from vkmax.functions.messages import edit_message, send_message
+from vkmax.functions.messages import edit_message as _vkmax_edit_message
+from vkmax.functions.messages import send_message as _vkmax_send_message
+
+from core.log_buffer import log_buffer
 
 LOG_FORMAT = "[%(asctime)s] [%(levelname)s] %(name)s: %(message)s"
 DATE_FORMAT = "%d.%m.%Y %H:%M:%S"
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, datefmt=DATE_FORMAT)
 logger = logging.getLogger("max-userbot")
+
+# Подключаем ring-buffer к корневому logger'у — теперь всё, что попадает в
+# logging.*, доступно через /api/logs (SSE) и /api/stats.
+log_buffer.setLevel(logging.INFO)
+log_buffer.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT))
+logging.getLogger().addHandler(log_buffer)
 
 SESSION_FILE = Path("max_session.txt")
 MODULES_DIR = Path("modules")
@@ -27,6 +36,33 @@ CONFIG_FILE = Path("userbot_config.json")
 ACCOUNTS_FILE = Path("accounts.json")
 DEFAULT_PREFIX = "."
 START_TS = int(time.time())
+
+
+# ------------------------------- stats / counters ----------------------------
+@dataclass
+class StatsCounters:
+    """Глобальные счётчики, отображаемые в Web UI / .stats команде."""
+    packets_in: int = 0
+    packets_out: int = 0
+    commands_handled: int = 0
+    last_command_ts: float = 0.0
+    last_error_ts: float = 0.0
+    last_error_msg: str = ""
+
+
+stats = StatsCounters()
+
+
+async def send_message(client: MaxClient, chat_id: int, text: str, *args: Any, **kwargs: Any) -> Any:
+    """Wrapper над vkmax send_message с инкрементом счётчика исходящих."""
+    stats.packets_out += 1
+    return await _vkmax_send_message(client, chat_id, text, *args, **kwargs)
+
+
+async def edit_message(client: MaxClient, chat_id: int, message_id: int, text: str, *args: Any, **kwargs: Any) -> Any:
+    """Wrapper над vkmax edit_message с инкрементом счётчика исходящих."""
+    stats.packets_out += 1
+    return await _vkmax_edit_message(client, chat_id, message_id, text, *args, **kwargs)
 
 
 # ----------------------------- formatting helpers -----------------------------
@@ -786,6 +822,89 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
   z-index: 100;
 }
 .md3-snackbar--open { bottom: 32px; }
+
+/* ---- stats tiles ------------------------------------------------------- */
+.md3-section__hint {
+  margin-left: auto;
+  font: var(--md-sys-typescale-label);
+  color: var(--md-sys-color-on-surface-variant);
+}
+.md3-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+.md3-tile {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 16px;
+  background: var(--md-sys-color-surface-container-high);
+  border-radius: var(--md-sys-radius-md);
+  transition: transform 200ms ease, box-shadow 200ms ease;
+}
+.md3-tile:hover { transform: translateY(-1px); box-shadow: var(--md-elev-1); }
+.md3-tile .material-symbols-outlined {
+  background: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+  border-radius: 999px; padding: 8px; font-size: 22px;
+}
+.md3-tile b { display: block; font: var(--md-sys-typescale-display); font-size: 22px; line-height: 1.1; }
+.md3-tile small { color: var(--md-sys-color-on-surface-variant); font-size: 12px; }
+.md3-stat-error {
+  display: flex; align-items: center; gap: 8px;
+  margin: 12px 0 0; padding: 10px 12px;
+  background: color-mix(in srgb, var(--md-sys-color-error) 15%, transparent);
+  color: var(--md-sys-color-error);
+  border-radius: var(--md-sys-radius-md);
+  font-size: 13px;
+}
+.md3-stat-error[hidden] { display: none; }
+
+/* ---- logs viewer ------------------------------------------------------- */
+.md3-logs__controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.md3-logs__card { padding: 0 !important; overflow: hidden; }
+.md3-log-view {
+  margin: 0;
+  height: 360px; overflow: auto;
+  padding: 14px 18px;
+  background: var(--md-sys-color-surface-container-highest);
+  font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospace;
+  font-size: 12.5px; line-height: 1.55;
+  color: var(--md-sys-color-on-surface);
+  white-space: pre-wrap; word-break: break-word;
+  scrollbar-width: thin;
+}
+.md3-log-view::-webkit-scrollbar { width: 8px; }
+.md3-log-view::-webkit-scrollbar-thumb { background: var(--md-sys-color-outline-variant); border-radius: 4px; }
+.md3-log-view > span { display: block; }
+.md3-log-ts { color: var(--md-sys-color-on-surface-variant); }
+.md3-log-lvl {
+  display: inline-block; min-width: 64px;
+  padding: 0 6px; margin-right: 4px;
+  border-radius: 4px;
+  font-weight: 700; font-size: 11px;
+  background: var(--md-sys-color-surface-container);
+}
+.md3-log-name { color: var(--md-sys-color-primary); margin-right: 4px; }
+.md3-log-debug   .md3-log-lvl { color: var(--md-sys-color-on-surface-variant); }
+.md3-log-info    .md3-log-lvl { color: var(--md-sys-color-primary); }
+.md3-log-warning .md3-log-lvl { color: #FFB800; }
+.md3-log-error,
+.md3-log-critical { color: var(--md-sys-color-error); }
+.md3-log-error    .md3-log-lvl,
+.md3-log-critical .md3-log-lvl {
+  background: color-mix(in srgb, var(--md-sys-color-error) 25%, transparent);
+  color: var(--md-sys-color-error);
+}
+.md3-select {
+  padding: 8px 12px;
+  background: var(--md-sys-color-surface-container-highest);
+  color: var(--md-sys-color-on-surface);
+  border: 1px solid var(--md-sys-color-outline);
+  border-radius: var(--md-sys-radius-sm);
+  font: var(--md-sys-typescale-body); font-size: 13px;
+  cursor: pointer;
+}
+.md3-select:focus { outline: 2px solid var(--md-sys-color-primary); outline-offset: 2px; }
 """
 
     async def index(self, request: web.Request) -> web.Response:
@@ -875,6 +994,77 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
   </nav>
 
   <main class='md3-main'>
+    <section class='md3-section' id='stats'>
+      <header class='md3-section__header'>
+        <h2><span class='material-symbols-outlined'>monitoring</span>Статистика</h2>
+        <span class='md3-section__hint' id='md3-stats-hint'>обновляется каждые 2с</span>
+      </header>
+      <article class='md3-card md3-card--elevated'>
+        <div class='md3-stat-grid' id='md3-stat-grid'>
+          <div class='md3-tile' data-key='uptime_seconds'>
+            <span class='material-symbols-outlined'>schedule</span>
+            <div><b id='md3-stat-uptime'>—</b><small>uptime</small></div>
+          </div>
+          <div class='md3-tile' data-key='modules'>
+            <span class='material-symbols-outlined'>extension</span>
+            <div><b id='md3-stat-modules'>—</b><small>модулей</small></div>
+          </div>
+          <div class='md3-tile' data-key='commands'>
+            <span class='material-symbols-outlined'>terminal</span>
+            <div><b id='md3-stat-commands'>—</b><small>команд</small></div>
+          </div>
+          <div class='md3-tile' data-key='watchers'>
+            <span class='material-symbols-outlined'>sensors</span>
+            <div><b id='md3-stat-watchers'>—</b><small>watcher'ов</small></div>
+          </div>
+          <div class='md3-tile' data-key='accounts'>
+            <span class='material-symbols-outlined'>group</span>
+            <div><b id='md3-stat-accounts'>—</b><small>аккаунтов</small></div>
+          </div>
+          <div class='md3-tile' data-key='packets_in'>
+            <span class='material-symbols-outlined'>arrow_downward</span>
+            <div><b id='md3-stat-pktin'>—</b><small>входящих</small></div>
+          </div>
+          <div class='md3-tile' data-key='packets_out'>
+            <span class='material-symbols-outlined'>arrow_upward</span>
+            <div><b id='md3-stat-pktout'>—</b><small>исходящих</small></div>
+          </div>
+          <div class='md3-tile' data-key='commands_handled'>
+            <span class='material-symbols-outlined'>check_circle</span>
+            <div><b id='md3-stat-cmdhandled'>—</b><small>обработано</small></div>
+          </div>
+        </div>
+        <p class='md3-stat-error' id='md3-stat-error' hidden>
+          <span class='material-symbols-outlined'>error</span>
+          <span id='md3-stat-error-msg'></span>
+        </p>
+      </article>
+    </section>
+
+    <section class='md3-section' id='logs'>
+      <header class='md3-section__header'>
+        <h2><span class='material-symbols-outlined'>article</span>Логи</h2>
+        <div class='md3-logs__controls'>
+          <select id='md3-log-level' class='md3-select'>
+            <option value=''>Все уровни</option>
+            <option value='DEBUG'>DEBUG</option>
+            <option value='INFO' selected>INFO+</option>
+            <option value='WARNING'>WARNING+</option>
+            <option value='ERROR'>ERROR</option>
+          </select>
+          <button id='md3-log-pause' class='md3-btn md3-btn--tonal' type='button'>
+            <span class='material-symbols-outlined'>pause</span><span>Пауза</span>
+          </button>
+          <button id='md3-log-clear' class='md3-btn md3-btn--outlined' type='button'>
+            <span class='material-symbols-outlined'>delete_sweep</span>Очистить
+          </button>
+        </div>
+      </header>
+      <article class='md3-card md3-card--elevated md3-logs__card'>
+        <pre id='md3-log-view' class='md3-log-view'>connecting…</pre>
+      </article>
+    </section>
+
     <section class='md3-section' id='accounts'>
       <header class='md3-section__header'>
         <h2><span class='material-symbols-outlined'>person</span>Аккаунты</h2>
@@ -970,6 +1160,107 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
     showSnack._t = setTimeout(() => snack.classList.remove('md3-snackbar--open'), 2400);
   }};
   showSnack({snackbar_text!r});
+
+  // ---- stats polling ----
+  const fmtUptime = (s) => {{
+    s = Math.max(0, Math.floor(s));
+    const d = Math.floor(s / 86400); s -= d*86400;
+    const h = Math.floor(s / 3600); s -= h*3600;
+    const m = Math.floor(s / 60); s -= m*60;
+    const parts = [];
+    if (d) parts.push(d + 'd');
+    if (h || d) parts.push(h + 'h');
+    if (m || h || d) parts.push(m + 'm');
+    parts.push(s + 's');
+    return parts.join(' ');
+  }};
+  const setText = (id, val) => {{
+    const el = document.getElementById(id); if (el) el.textContent = val;
+  }};
+  const fetchStats = async () => {{
+    try {{
+      const r = await fetch('/api/stats', {{cache: 'no-store'}});
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const s = await r.json();
+      setText('md3-stat-uptime', fmtUptime(s.uptime_seconds));
+      setText('md3-stat-modules', s.modules);
+      setText('md3-stat-commands', s.commands);
+      setText('md3-stat-watchers', s.watchers);
+      setText('md3-stat-accounts', s.accounts + ' / ' + s.accounts_authorized);
+      setText('md3-stat-pktin', s.packets_in);
+      setText('md3-stat-pktout', s.packets_out);
+      setText('md3-stat-cmdhandled', s.commands_handled);
+      const errBox = document.getElementById('md3-stat-error');
+      if (s.last_error_msg) {{
+        document.getElementById('md3-stat-error-msg').textContent = s.last_error_msg;
+        errBox.hidden = false;
+      }} else {{
+        errBox.hidden = true;
+      }}
+    }} catch (e) {{
+      const hint = document.getElementById('md3-stats-hint');
+      if (hint) hint.textContent = 'offline · ' + e.message;
+    }}
+  }};
+  fetchStats();
+  setInterval(fetchStats, 2000);
+
+  // ---- logs SSE ----
+  const LEVEL_RANK = {{DEBUG: 10, INFO: 20, WARNING: 30, ERROR: 40, CRITICAL: 50}};
+  const logView = document.getElementById('md3-log-view');
+  const levelSelect = document.getElementById('md3-log-level');
+  const pauseBtn = document.getElementById('md3-log-pause');
+  const clearBtn = document.getElementById('md3-log-clear');
+  let paused = false;
+  let buffered = [];
+  const MAX_LINES = 800;
+
+  const renderLog = (entry) => {{
+    const lvl = (entry.level || 'INFO').toUpperCase();
+    const cls = 'md3-log-' + lvl.toLowerCase();
+    const safe = (entry.msg || '').replace(/[&<>]/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;'}})[c]);
+    return `<span class="${{cls}}"><span class="md3-log-ts">${{entry.ts_iso || ''}}</span> <span class="md3-log-lvl">${{lvl}}</span> <span class="md3-log-name">${{(entry.name||'').replace(/[&<>]/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;'}})[c])}}</span> ${{safe}}</span>`;
+  }};
+
+  const flushView = () => {{
+    if (paused) return;
+    const minLevel = LEVEL_RANK[levelSelect.value] || 0;
+    const lines = buffered.filter(e => (LEVEL_RANK[(e.level||'').toUpperCase()] || 0) >= minLevel);
+    if (lines.length > MAX_LINES) lines.splice(0, lines.length - MAX_LINES);
+    logView.innerHTML = lines.map(renderLog).join('\\n');
+    logView.scrollTop = logView.scrollHeight;
+  }};
+
+  const appendLog = (entry) => {{
+    buffered.push(entry);
+    if (buffered.length > MAX_LINES * 2) buffered.splice(0, buffered.length - MAX_LINES * 2);
+    flushView();
+  }};
+
+  let es = null;
+  const connect = () => {{
+    if (es) es.close();
+    es = new EventSource('/api/logs/stream');
+    es.onmessage = (ev) => {{
+      try {{ appendLog(JSON.parse(ev.data)); }} catch (_) {{}}
+    }};
+    es.onerror = () => {{
+      // EventSource будет переподключаться автоматически.
+    }};
+  }};
+  connect();
+
+  levelSelect.addEventListener('change', flushView);
+  pauseBtn.addEventListener('click', () => {{
+    paused = !paused;
+    pauseBtn.querySelector('.material-symbols-outlined').textContent = paused ? 'play_arrow' : 'pause';
+    pauseBtn.querySelector('span:last-child').textContent = paused ? 'Возобновить' : 'Пауза';
+    if (!paused) flushView();
+  }});
+  clearBtn.addEventListener('click', () => {{
+    buffered = [];
+    flushView();
+  }});
 }})();
 </script>
 </body>
@@ -1016,12 +1307,75 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
         }
         return web.json_response(body)
 
+    async def stats_endpoint(self, _: web.Request) -> web.Response:
+        accounts = self.account_store.load()
+        commands = sum(len(m.commands) for m in self.registry.available_modules)
+        body = {
+            "uptime_seconds": int(time.time()) - START_TS,
+            "modules": len(self.registry.available_modules),
+            "accounts": len(accounts),
+            "accounts_authorized": sum(1 for a in accounts if a.state == "authorized"),
+            "commands": commands,
+            "watchers": len(self.registry.packet_watchers),
+            "class_commands": len(self.registry.class_commands),
+            "packets_in": stats.packets_in,
+            "packets_out": stats.packets_out,
+            "commands_handled": stats.commands_handled,
+            "last_command_ts": stats.last_command_ts,
+            "last_error_ts": stats.last_error_ts,
+            "last_error_msg": stats.last_error_msg,
+        }
+        return web.json_response(body)
+
+    async def logs_history(self, request: web.Request) -> web.Response:
+        try:
+            limit = int(request.query.get("limit", "200"))
+        except ValueError:
+            limit = 200
+        return web.json_response({"records": log_buffer.snapshot(limit)})
+
+    async def logs_stream(self, request: web.Request) -> web.StreamResponse:
+        """Server-Sent Events стрим всех новых лог-записей."""
+        response = web.StreamResponse(
+            status=200,
+            reason="OK",
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+        await response.prepare(request)
+
+        # Сначала пушим последние 100 строк, чтобы клиент сразу увидел контекст.
+        for entry in log_buffer.snapshot(100):
+            await response.write(b"data: " + json.dumps(entry).encode() + b"\n\n")
+
+        queue = log_buffer.subscribe()
+        try:
+            while True:
+                try:
+                    entry = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    await response.write(b"data: " + json.dumps(entry).encode() + b"\n\n")
+                except asyncio.TimeoutError:
+                    # heartbeat-комментарий, чтобы прокси не разрывали connection
+                    await response.write(b": keepalive\n\n")
+        except (asyncio.CancelledError, ConnectionResetError):
+            pass
+        finally:
+            log_buffer.unsubscribe(queue)
+        return response
+
     async def start(self) -> str:
         if self.runner is not None:
             return f"http://{self.host}:{self.port}"
         app = web.Application()
         app.router.add_get("/", self.index)
         app.router.add_get("/health", self.health)
+        app.router.add_get("/api/stats", self.stats_endpoint)
+        app.router.add_get("/api/logs", self.logs_history)
+        app.router.add_get("/api/logs/stream", self.logs_stream)
         app.router.add_post("/api/accounts", self.add_account)
         app.router.add_post("/api/config", self.update_config)
         self.runner = web.AppRunner(app)
@@ -1349,6 +1703,7 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
 
 
 async def on_packet(client: MaxClient, packet: dict) -> None:
+    stats.packets_in += 1
     for watcher in module_registry.packet_watchers:
         try:
             await watcher(client, packet)
@@ -1379,9 +1734,13 @@ async def on_packet(client: MaxClient, packet: dict) -> None:
 
     try:
         handled = await process_builtin(client, packet, int(chat_id), int(message_id), cmd.lower(), arg)
+        stats.commands_handled += 1
+        stats.last_command_ts = time.time()
         if not handled:
             await edit_message(client, int(chat_id), int(message_id), f"Неизвестная команда: <code>{html.escape(cmd)}</code>")
     except Exception as exc:  # noqa: BLE001
+        stats.last_error_ts = time.time()
+        stats.last_error_msg = f"{type(exc).__name__}: {exc}"
         logger.exception("Command processing failed")
         await edit_message(client, int(chat_id), int(message_id), f"Ошибка: <code>{html.escape(type(exc).__name__)}: {html.escape(str(exc))}</code>")
 
