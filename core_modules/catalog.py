@@ -40,6 +40,11 @@ def setup(registry):
                     name="lock",
                     description="Закрыть сессию опасных действий",
                 ),
+                ModuleCommand(
+                    name="threats",
+                    description="Сканировать modules/ на опасные паттерны",
+                    aliases=["scanmod"],
+                ),
             ],
         )
     )

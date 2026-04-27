@@ -917,6 +917,60 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
   background: var(--md-sys-color-surface-container);
   color: var(--md-sys-color-on-surface-variant);
 }
+.md3-badge--threat-critical { background: #FFEDEA; color: #B3261E; }
+.md3-badge--threat-high     { background: #FFF1D6; color: #7A4F00; }
+.md3-badge--threat-medium   { background: #FFF7E0; color: #6B5300; }
+.md3-badge--threat-ok       { background: var(--md-sys-color-tertiary-container); color: var(--md-sys-color-on-tertiary-container); }
+@media (prefers-color-scheme: dark) {
+  .md3-badge--threat-critical { background: rgba(255, 100, 100, 0.18); color: #FFB4AB; }
+  .md3-badge--threat-high     { background: rgba(255, 200, 100, 0.18); color: #FFD78A; }
+  .md3-badge--threat-medium   { background: rgba(255, 220, 130, 0.14); color: #FFE8A8; }
+}
+
+/* ---- threats panel ---------------------------------------------------- */
+.md3-threats__summary {
+  display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px;
+}
+.md3-threat-card {
+  background: var(--md-sys-color-surface-container);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: 16px;
+  padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 8px;
+  margin-bottom: 10px;
+}
+.md3-threat-card--critical { border-color: #B3261E; }
+.md3-threat-card--high     { border-color: #B58A3F; }
+.md3-threat-card--medium   { border-color: var(--md-sys-color-outline); }
+.md3-threat-card__head {
+  display: flex; gap: 12px; align-items: center; justify-content: space-between;
+}
+.md3-threat-card__title { font-weight: 600; }
+.md3-threat-card__file {
+  font-family: 'Roboto Mono', monospace;
+  font-size: 11px; color: var(--md-sys-color-on-surface-variant);
+}
+.md3-threat-list {
+  list-style: none; padding: 0; margin: 0;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.md3-threat-list li {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 8px 10px; border-radius: 10px;
+  background: var(--md-sys-color-surface-container-highest);
+}
+.md3-threat-list .label { font-weight: 500; }
+.md3-threat-list .meta {
+  font-size: 11px; color: var(--md-sys-color-on-surface-variant);
+}
+.md3-threat-list .snippet {
+  font-family: 'Roboto Mono', monospace; font-size: 12px;
+  color: var(--md-sys-color-on-surface);
+  padding: 6px 8px; border-radius: 6px;
+  background: var(--md-sys-color-surface);
+  white-space: pre-wrap; word-break: break-all;
+}
+.md3-threat-card__actions { display: flex; gap: 8px; }
 
 /* ---- unlock modal ----------------------------------------------------- */
 .md3-modal[hidden] { display: none; }
@@ -1186,6 +1240,16 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
       <article class='md3-card md3-card--elevated md3-logs__card'>
         <pre id='md3-log-view' class='md3-log-view'>connecting…</pre>
       </article>
+    </section>
+
+    <section class='md3-section' id='threats'>
+      <header class='md3-section__header'>
+        <h2><span class='material-symbols-outlined'>shield</span>Безопасность модулей</h2>
+        <span class='md3-section__hint' id='md3-threats-hint'>сканируем…</span>
+      </header>
+      <div id='md3-threats-grid'>
+        <div class='md3-empty'>Сканер запускается…</div>
+      </div>
     </section>
 
     <section class='md3-section' id='catalog'>
@@ -1593,8 +1657,121 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
     await exec();
   }});
 
+  // ---- threats scanner ----
+  const threatsHost = document.getElementById('md3-threats-grid');
+  const threatsHint = document.getElementById('md3-threats-hint');
+
+  const SEV_LABEL = {{
+    critical: 'критично',
+    high: 'высокая',
+    medium: 'средняя',
+    ok: 'чисто',
+  }};
+
+  const renderThreatModule = (m) => {{
+    const card = document.createElement('article');
+    card.className = 'md3-threat-card md3-threat-card--' + m.severity;
+    const sevBadge = `<span class="md3-badge md3-badge--threat-${{m.severity}}">${{escHtml(SEV_LABEL[m.severity] || m.severity)}}</span>`;
+    const items = m.threats.map(t => `
+      <li>
+        <span class='label'>${{escHtml(t.label)}}</span>
+        <span class='meta'>${{escHtml(t.severity)}} · строка ${{t.line}}</span>
+        ${{t.snippet ? `<span class='snippet'>${{escHtml(t.snippet)}}</span>` : ''}}
+        <span class='meta'>${{escHtml(t.suggestion)}}</span>
+      </li>
+    `).join('');
+    const fileBase = (m.file || '').split('/').pop() || m.file;
+    card.innerHTML = `
+      <div class='md3-threat-card__head'>
+        <div>
+          <div class='md3-threat-card__title'>${{escHtml(m.module)}}</div>
+          <div class='md3-threat-card__file'>${{escHtml(fileBase)}}</div>
+        </div>
+        ${{sevBadge}}
+      </div>
+      <ul class='md3-threat-list'>${{items}}</ul>
+      <div class='md3-threat-card__actions'>
+        <button class='md3-btn md3-btn--filled' data-action='threat-remove' data-filename='${{escHtml(fileBase)}}'>
+          <span class='material-symbols-outlined'>delete_forever</span><span>Удалить модуль</span>
+        </button>
+      </div>
+    `;
+    return card;
+  }};
+
+  const loadThreats = async () => {{
+    try {{
+      const r = await fetch('/api/threats', {{credentials: 'same-origin'}});
+      if (!r.ok) throw new Error('http ' + r.status);
+      const data = await r.json();
+      const sum = data.summary || {{}};
+      threatsHost.innerHTML = '';
+
+      const summaryRow = document.createElement('div');
+      summaryRow.className = 'md3-threats__summary';
+      const pills = [
+        ['critical', 'критичных'],
+        ['high', 'высокая'],
+        ['medium', 'средняя'],
+        ['ok', 'чистых'],
+      ].map(([k, label]) => {{
+        const n = sum[k] || 0;
+        return `<span class='md3-badge md3-badge--threat-${{k}}'>${{n}} · ${{escHtml(label)}}</span>`;
+      }}).join('');
+      summaryRow.innerHTML = `<span class='md3-section__hint'>Всего модулей: ${{sum.total || 0}}</span>${{pills}}`;
+      threatsHost.appendChild(summaryRow);
+
+      const dangerous = (data.modules || []).filter(m => m.severity !== 'ok');
+      if (dangerous.length === 0) {{
+        const ok = document.createElement('div');
+        ok.className = 'md3-empty';
+        ok.textContent = 'Опасных паттернов не найдено в установленных модулях.';
+        threatsHost.appendChild(ok);
+      }} else {{
+        dangerous.sort((a, b) => {{
+          const order = {{ critical: 0, high: 1, medium: 2, ok: 3 }};
+          return (order[a.severity] || 9) - (order[b.severity] || 9);
+        }});
+        dangerous.forEach(m => threatsHost.appendChild(renderThreatModule(m)));
+      }}
+      threatsHint.textContent = `просканировано ${{sum.total || 0}} • опасных: ${{(sum.critical || 0) + (sum.high || 0)}}`;
+    }} catch (e) {{
+      threatsHint.textContent = 'оффлайн';
+      threatsHost.innerHTML = `<div class='md3-empty'>Сканер недоступен: ${{escHtml(e.message || e)}}</div>`;
+    }}
+  }};
+
+  document.addEventListener('click', async (ev) => {{
+    const btn = ev.target.closest('[data-action="threat-remove"]');
+    if (!btn) return;
+    const filename = btn.dataset.filename;
+    if (!filename) return;
+    if (!confirm('Удалить файл модуля «' + filename + '»? Действие необратимо.')) return;
+    btn.disabled = true;
+    const exec = async () => {{
+      const fd = new FormData();
+      fd.append('filename', filename);
+      const r = await fetch('/api/threats/remove', {{method: 'POST', body: fd, credentials: 'same-origin'}});
+      if (r.status === 403) {{
+        btn.disabled = false;
+        openModal(null, 'Удаление модуля требует unlock-сессию.');
+        return;
+      }}
+      if (r.ok) {{
+        await loadThreats();
+        await loadCatalog();
+      }} else {{
+        btn.disabled = false;
+        const t = await r.text();
+        alert('Не удалось удалить: ' + t);
+      }}
+    }};
+    await exec();
+  }});
+
   fetchAuth();
   loadCatalog();
+  loadThreats();
 }})();
 </script>
 </body>
@@ -1811,6 +1988,32 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
             logger.info("Каталог: удалён %s", filename)
         return web.json_response(body)
 
+    async def threats_endpoint(self, _: web.Request) -> web.Response:
+        from core.threat_scan import scan_directory, summary
+
+        scans = scan_directory(MODULES_DIR)
+        return web.json_response(
+            {
+                "summary": summary(scans),
+                "modules": [s.to_dict() for s in scans],
+            }
+        )
+
+    async def threat_remove(self, request: web.Request) -> web.Response:
+        if not self._is_request_unlocked(request):
+            return web.json_response({"ok": False, "reason": "locked"}, status=403)
+        data = await request.post()
+        filename = (data.get("filename") or "").strip()
+        # filename защищён внутри uninstall_module — никаких path traversal.
+        result = uninstall_module(filename, MODULES_DIR)
+        ok = result.status == "installed"
+        body = {"ok": ok, "status": result.status, "filename": filename}
+        if not ok:
+            body["error"] = result.error
+        else:
+            logger.info("Threat-scan: удалён модуль %s", filename)
+        return web.json_response(body)
+
     async def start(self) -> str:
         if self.runner is not None:
             return f"http://{self.host}:{self.port}"
@@ -1826,6 +2029,8 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
         app.router.add_get("/api/catalog", self.catalog_endpoint)
         app.router.add_post("/api/catalog/install", self.catalog_install)
         app.router.add_post("/api/catalog/uninstall", self.catalog_uninstall)
+        app.router.add_get("/api/threats", self.threats_endpoint)
+        app.router.add_post("/api/threats/remove", self.threat_remove)
         app.router.add_post("/api/accounts", self.add_account)
         app.router.add_post("/api/config", self.update_config)
         self.runner = web.AppRunner(app)
@@ -2006,6 +2211,38 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
                 f"{html.escape(r['description'])}"
             )
         lines.append("\nУстановить: <code>.installmod &lt;name&gt;</code>")
+        await edit_message(client, destination_chat, message_id, "\n".join(lines))
+        return True
+
+    if cmd in {"threats", "scanmod"}:
+        from core.threat_scan import scan_directory, summary
+
+        scans = scan_directory(MODULES_DIR)
+        sm = summary(scans)
+        if not scans:
+            await edit_message(client, destination_chat, message_id, "В <code>modules/</code> нет .py файлов для сканирования.")
+            return True
+        lines = [
+            "<b>🛡 Сканер модулей</b>",
+            f"всего: {sm['total']} · "
+            f"критичных: {sm['critical']} · высокая: {sm['high']} · средняя: {sm['medium']} · чистых: {sm['ok']}",
+            "",
+        ]
+        ICON = {"critical": "🔴", "high": "🟠", "medium": "🟡", "ok": "🟢"}
+        for s in sorted(scans, key=lambda x: ("critical", "high", "medium", "ok").index(x.severity)):
+            if s.severity == "ok" and cmd == "threats":
+                continue
+            lines.append(f"{ICON[s.severity]} <b>{html.escape(s.module)}</b>")
+            for t in s.threats[:6]:
+                lines.append(
+                    f"  └ {html.escape(t.label)} (стр. {t.line})"
+                )
+            if len(s.threats) > 6:
+                lines.append(f"  …и ещё {len(s.threats) - 6} замечаний")
+        if len(lines) <= 3:
+            lines.append("✅ Опасных паттернов не найдено.")
+        else:
+            lines.append("\nУдалить опасный модуль: <code>.uninstallmod &lt;name&gt;</code>")
         await edit_message(client, destination_chat, message_id, "\n".join(lines))
         return True
 
