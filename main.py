@@ -9,6 +9,8 @@ import logging
 import signal
 from pathlib import Path
 
+from core import loader as core_loader
+from core.db import db as kv_db
 from core.multiaccount import AccountEntry as MultiAccountEntry
 from core.multiaccount import multiaccount_manager
 from userbot import (
@@ -32,7 +34,14 @@ CORE_MODULES_DIR = Path(__file__).resolve().parent / "core_modules"
 
 
 def _load_core_modules() -> None:
-    """Импортирует и регистрирует встроенные модули из ./core_modules/."""
+    """Импортирует и регистрирует встроенные модули из ./core_modules/.
+
+    Поддерживается два API:
+    - старый: `setup(registry)`-функция в файле модуля.
+    - новый: класс(ы), наследующие `core.loader.Module` (Hikka-style) — будут
+      инстанциированы и зарегистрированы через `core_loader.discover_and_register`
+      (но без активного клиента — он подцепится при первом подходящем connect).
+    """
     if not CORE_MODULES_DIR.exists():
         return
 
@@ -49,9 +58,45 @@ def _load_core_modules() -> None:
             setup = getattr(mod, "setup", None)
             if callable(setup):
                 setup(module_registry)
-                logger.info("Загружен core-модуль: %s", path.stem)
+                logger.info("Загружен core-модуль (legacy): %s", path.stem)
         except Exception as exc:  # noqa: BLE001
             logger.error("Не удалось загрузить core-модуль %s: %s", path.name, exc)
+
+
+async def _load_class_modules(client) -> None:
+    """Сканирует ./modules и ./core_modules на класс-модули нового API."""
+    seen_files: set[Path] = set()
+
+    candidates: list[Path] = []
+    for directory in (CORE_MODULES_DIR, Path("modules")):
+        if directory.exists():
+            for path in sorted(directory.rglob("*.py")):
+                if path.name.startswith("_"):
+                    continue
+                candidates.append(path)
+
+    for path in candidates:
+        if path in seen_files:
+            continue
+        seen_files.add(path)
+        module_name = f"_classmod_{path.stem}_{abs(hash(str(path))) % 100000}"
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, path)
+            if spec is None or spec.loader is None:
+                continue
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            instances = await core_loader.discover_and_register(
+                mod, module_registry, client, kv_db
+            )
+            if instances:
+                logger.info(
+                    "Загружено class-модулей из %s: %s",
+                    path.name,
+                    ", ".join(i.strings.get("name", type(i).__name__) for i in instances),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Не удалось загрузить class-модуль %s: %s", path.name, exc)
 
 
 def _migrate_legacy_session() -> None:
@@ -108,8 +153,13 @@ async def main():
     # Загружаем конфиги
     config_store.load()
 
-    # Регистрируем встроенные модули из ./core_modules
+    # Регистрируем встроенные модули из ./core_modules (legacy setup(registry) API)
     _load_core_modules()
+
+    # Регистрируем class-модули (Hikka-style) из ./core_modules и ./modules
+    # client здесь None — он становится доступен после connect_account, но команды
+    # уже зарегистрированы и будут диспатчиться корректно.
+    await _load_class_modules(client=None)
 
     # Регистрируем callback по умолчанию, чтобы все аккаунты получали обработчик автоматически
     multiaccount_manager.set_default_callback(on_packet)
@@ -160,6 +210,7 @@ async def main():
     except KeyboardInterrupt:
         logger.info("Остановка по KeyboardInterrupt...")
     finally:
+        await core_loader.on_unload_all()
         await multiaccount_manager.disconnect_all()
         await webui.stop()
         await weather_client.close()

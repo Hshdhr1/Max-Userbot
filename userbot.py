@@ -216,6 +216,8 @@ class ModuleRegistry:
     command_to_module: dict[str, str] = field(default_factory=dict)
     dynamic_commands: dict[str, Callable[[BotContext, int, int, str], Awaitable[str]]] = field(default_factory=dict)
     packet_watchers: list[PacketWatcher] = field(default_factory=list)
+    # Hikka-совместимые команды: имя -> (instance, async-метод)
+    class_commands: dict[str, tuple[Any, Callable[..., Awaitable[Any]]]] = field(default_factory=dict)
 
     def register_module(self, module: BotModule) -> None:
         key = module.name.lower()
@@ -854,6 +856,16 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
         chosen = random.choice(chats)
         await send_message(client, chosen, arg)
         await edit_message(client, destination_chat, message_id, f"Отправлено в chat_id={chosen}")
+        return True
+
+    # Сначала пробуем class-based (Hikka-style) команды.
+    klass = module_registry.class_commands.get(cmd)
+    if klass:
+        from core import loader as core_loader
+        from core.message import MaxMessage
+
+        message_obj = MaxMessage(client, packet, registry=module_registry)
+        await core_loader.dispatch_command(klass, message_obj)
         return True
 
     dyn = module_registry.dynamic_commands.get(cmd)
