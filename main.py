@@ -4,15 +4,19 @@
 """
 
 import asyncio
+import getpass
 import importlib.util
 import logging
+import os
 import signal
+import sys
 from pathlib import Path
 
 from core import loader as core_loader
 from core.db import db as kv_db
 from core.multiaccount import AccountEntry as MultiAccountEntry
 from core.multiaccount import multiaccount_manager
+from core.security import hash_password
 from userbot import (
     SESSION_FILE,
     account_store,
@@ -144,6 +148,58 @@ def _migrate_legacy_session() -> None:
     logger.info("Legacy max_session.txt мигрирован в multi-account как 'main'")
 
 
+def _setup_dangerous_password() -> None:
+    """При первом запуске интерактивно запрашивает пароль для опасных действий.
+
+    Если у нас нет TTY (демонизированный запуск), просто пропускаем — пользователь
+    может задать `MAX_DANGEROUS_PASSWORD` через переменную окружения.
+    """
+    if config_store.data.dangerous_password_hash:
+        return
+
+    env_password = (os.getenv("MAX_DANGEROUS_PASSWORD") or "").strip()
+    if env_password:
+        hex_hash, hex_salt = hash_password(env_password)
+        config_store.data.dangerous_password_hash = hex_hash
+        config_store.data.dangerous_password_salt = hex_salt
+        config_store.save()
+        logger.info("Пароль для опасных действий установлен из MAX_DANGEROUS_PASSWORD.")
+        return
+
+    if not sys.stdin.isatty():
+        logger.warning(
+            "Пароль для опасных действий не задан. В TTY-режиме можно установить интерактивно, "
+            "либо передать через переменную MAX_DANGEROUS_PASSWORD."
+        )
+        return
+
+    print("\n=========================================================")
+    print("  Установите пароль для опасных действий")
+    print("  (eval/terminal/.dlm/install/uninstall/addaccount).")
+    print("  Введите пустую строку, чтобы пропустить — но тогда")
+    print("  опасные действия будут разрешены без подтверждения.")
+    print("=========================================================")
+    while True:
+        try:
+            pw1 = getpass.getpass("Пароль: ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if not pw1:
+            logger.info("Пароль не задан — опасные действия будут выполняться без проверки.")
+            return
+        pw2 = getpass.getpass("Повторите пароль: ")
+        if pw1 != pw2:
+            print("Пароли не совпадают. Попробуйте ещё раз.\n")
+            continue
+        hex_hash, hex_salt = hash_password(pw1)
+        config_store.data.dangerous_password_hash = hex_hash
+        config_store.data.dangerous_password_salt = hex_salt
+        config_store.save()
+        print("Пароль сохранён. Меняйте его командой .setpassword (или вручную в userbot_config.json).\n")
+        return
+
+
 async def main():
     """Основная функция запуска."""
     # Создаём директории
@@ -152,6 +208,9 @@ async def main():
 
     # Загружаем конфиги
     config_store.load()
+
+    # При первом запуске запрашиваем пароль для опасных действий.
+    _setup_dangerous_password()
 
     # Регистрируем встроенные модули из ./core_modules (legacy setup(registry) API)
     _load_core_modules()

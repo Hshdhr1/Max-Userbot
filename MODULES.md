@@ -201,3 +201,85 @@ def setup(registry):
   формой, с доком и текущим значением.
 - Health-check эндпоинт: `GET /health` — JSON со статусом, аптаймом, числом
   модулей и аккаунтов.
+
+## Каталог модулей
+
+Встроенный каталог хранится в `catalog.json` (рядом с `userbot.py`). Опционально
+можно задать переменную окружения `MAX_CATALOG_URL` — тогда каталог сначала
+будет качаться оттуда (HTTPS-URL JSON в том же формате).
+
+Формат записи:
+
+```json
+{
+  "name": "Foo",
+  "description": "что делает",
+  "version": "1.0",
+  "author": "you",
+  "filename": "foo.py",
+  "url": "https://raw.githubusercontent.com/.../foo.py",
+  "tags": ["category"]
+}
+```
+
+Команды (системный модуль `Catalog`):
+
+- `.catalog` — показать все записи каталога с пометкой «установлен/нет».
+- `.installmod <name>` — скачать `url` и положить в `modules/<filename>`. Размер
+  файла лимитирован 1 МБ. Если контент совпадает с уже установленным — возвращает
+  `up_to_date`.
+- `.uninstallmod <name>` — удалить файл модуля.
+
+В Web UI: секция «Каталог модулей» с MD3-карточками, кнопками Install/Uninstall
+и тегами. Все эти действия — опасные, требуют unlock (см. ниже).
+
+API эндпоинты:
+
+- `GET /api/catalog` → `{version, source, modules: [...] }` с полем `installed`.
+- `POST /api/catalog/install` (form: `name`) → требует unlock-cookie, иначе 403.
+- `POST /api/catalog/uninstall` (form: `name`) → то же.
+
+## Пароль для опасных действий
+
+При первом запуске `python main.py` спросит интерактивно через `getpass`:
+
+```
+=========================================================
+  Установите пароль для опасных действий
+  (eval/terminal/.dlm/install/uninstall/addaccount).
+=========================================================
+Пароль:
+Повторите пароль:
+```
+
+Хеш — `hashlib.scrypt` (stdlib, n=16384, r=8, p=1) — сохраняется в
+`userbot_config.json` (поля `dangerous_password_hash` и `dangerous_password_salt`).
+Пустой ввод пропускает установку — тогда бот работает как раньше, без проверок.
+В неинтерактивном режиме (systemd, docker без TTY) можно задать
+`MAX_DANGEROUS_PASSWORD=...` через окружение — будет однократно прохэширован
+и сохранён в конфиг.
+
+### Опасные команды
+
+`eval`, `exec`, `terminal`, `shell`, `sh`, `dlm`, `loadmod`, `installmod`,
+`uninstallmod`, `rmmod`, `addaccount`, `loginacc`, `deleteaccount`,
+`delaccount`, `removeaccount` — требуют активную unlock-сессию.
+
+В Telegram: `.unlock <пароль>` открывает сессию на 10 минут (по умолчанию;
+конфигурится `MAX_UNLOCK_TTL` в секундах). `.lock` — закрывает. После того как
+сессия истекла, дальнейшие опасные команды отвечают:
+
+```
+🔒 Команда требует unlock. Сначала выполните .unlock <пароль>
+```
+
+В Web UI: иконка-замок в app bar — клик по ней при закрытой сессии открывает
+модал с паролем; после успеха иконка становится `lock_open`. Любая опасная
+кнопка (Install / Uninstall / Add account) при закрытой сессии автоматически
+открывает этот же модал — после ввода пароля действие повторяется.
+
+Endpoints:
+
+- `GET /api/auth/status` → `{password_configured, unlocked, active_sessions}`.
+- `POST /api/auth/unlock` (form: `password`) → ставит httpOnly-cookie `max_unlock`.
+- `POST /api/auth/lock` → удаляет cookie и отзывает токен.

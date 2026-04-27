@@ -17,7 +17,15 @@ from vkmax.client import MaxClient
 from vkmax.functions.messages import edit_message as _vkmax_edit_message
 from vkmax.functions.messages import send_message as _vkmax_send_message
 
+from core.catalog import (
+    CatalogEntry,
+    annotate_installed,
+    install_module,
+    load_catalog,
+    uninstall_module,
+)
 from core.log_buffer import log_buffer
+from core.security import is_dangerous, session_manager, verify_password
 
 LOG_FORMAT = "[%(asctime)s] [%(levelname)s] %(name)s: %(message)s"
 DATE_FORMAT = "%d.%m.%Y %H:%M:%S"
@@ -102,6 +110,10 @@ class UserbotConfig:
     random_reroute_guard: bool = True
     favorites_chat_id: int | None = None
     module_configs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Пароль для опасных действий: scrypt-хеш + соль (hex). Если оба пусты —
+    # бот при старте интерактивно спросит пароль и сохранит в конфиг.
+    dangerous_password_hash: str = ""
+    dangerous_password_salt: str = ""
 
 
 @dataclass
@@ -859,6 +871,97 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
 }
 .md3-stat-error[hidden] { display: none; }
 
+/* ---- catalog cards ---------------------------------------------------- */
+.md3-catalog__card {
+  display: flex; flex-direction: column; gap: 12px;
+  padding: 20px;
+  background: var(--md-sys-color-surface-container-high);
+  border-radius: 16px;
+  box-shadow: var(--md-elev-0);
+  transition: transform 120ms ease, box-shadow 120ms ease;
+  border: 1px solid var(--md-sys-color-outline-variant);
+}
+.md3-catalog__card:hover { transform: translateY(-1px); box-shadow: var(--md-elev-1); }
+.md3-catalog__head {
+  display: flex; justify-content: space-between; align-items: flex-start; gap: 12px;
+}
+.md3-catalog__title {
+  font: var(--md-sys-typescale-title); margin: 0; color: var(--md-sys-color-on-surface);
+}
+.md3-catalog__meta {
+  font: var(--md-sys-typescale-label);
+  color: var(--md-sys-color-on-surface-variant);
+}
+.md3-catalog__desc {
+  margin: 0; color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-typescale-body);
+}
+.md3-catalog__tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.md3-catalog__tag {
+  padding: 2px 10px; border-radius: 999px;
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+  font: var(--md-sys-typescale-label); font-size: 11px;
+}
+.md3-catalog__actions { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+.md3-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 4px 10px; border-radius: 999px;
+  font: var(--md-sys-typescale-label); font-size: 11px;
+}
+.md3-badge--installed {
+  background: var(--md-sys-color-tertiary-container);
+  color: var(--md-sys-color-on-tertiary-container);
+}
+.md3-badge--available {
+  background: var(--md-sys-color-surface-container);
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+/* ---- unlock modal ----------------------------------------------------- */
+.md3-modal[hidden] { display: none; }
+.md3-modal {
+  position: fixed; inset: 0; z-index: 1000;
+  display: flex; align-items: center; justify-content: center;
+}
+.md3-modal__scrim {
+  position: absolute; inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(2px);
+  cursor: pointer;
+}
+.md3-modal__sheet {
+  position: relative;
+  background: var(--md-sys-color-surface-container-highest);
+  color: var(--md-sys-color-on-surface);
+  border-radius: 28px;
+  padding: 24px;
+  width: min(92vw, 420px);
+  display: flex; flex-direction: column; gap: 16px;
+  box-shadow: var(--md-elev-3, 0 8px 24px rgba(0,0,0,0.2));
+}
+.md3-modal__sheet h3 {
+  margin: 0; font: var(--md-sys-typescale-title);
+}
+.md3-modal__desc {
+  margin: 0; font: var(--md-sys-typescale-body);
+  color: var(--md-sys-color-on-surface-variant);
+}
+.md3-modal__actions {
+  display: flex; justify-content: flex-end; gap: 8px;
+}
+.md3-modal__error {
+  background: var(--md-sys-color-error-container);
+  color: var(--md-sys-color-on-error-container);
+  padding: 8px 12px; border-radius: 8px;
+  font: var(--md-sys-typescale-label);
+}
+.md3-modal__error[hidden] { display: none; }
+
+.md3-iconbtn .material-symbols-outlined.lock-unlocked {
+  color: var(--md-sys-color-tertiary);
+}
+
 /* ---- logs viewer ------------------------------------------------------- */
 .md3-logs__controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .md3-logs__card { padding: 0 !important; overflow: hidden; }
@@ -975,6 +1078,9 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
     <span class='md3-stat'><b>{uptime}s</b><small>uptime</small></span>
   </div>
   <div class='md3-app-bar__actions'>
+    <button id='md3-lock-toggle' class='md3-iconbtn' aria-label='Опасные действия' title='Опасные действия'>
+      <span class='material-symbols-outlined' id='md3-lock-icon'>lock</span>
+    </button>
     <button id='md3-theme-toggle' class='md3-iconbtn' aria-label='Переключить тему'>
       <span class='material-symbols-outlined'>dark_mode</span>
     </button>
@@ -983,6 +1089,23 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
     </a>
   </div>
 </header>
+
+<div class='md3-modal' id='md3-unlock-modal' hidden>
+  <div class='md3-modal__scrim' data-close='1'></div>
+  <div class='md3-modal__sheet' role='dialog' aria-modal='true' aria-labelledby='md3-unlock-title'>
+    <h3 id='md3-unlock-title'>Опасные действия</h3>
+    <p id='md3-unlock-desc' class='md3-modal__desc'></p>
+    <div class='md3-textfield'>
+      <input id='md3-unlock-pass' type='password' placeholder=' ' autocomplete='current-password'>
+      <label for='md3-unlock-pass'>Пароль</label>
+    </div>
+    <div class='md3-modal__error' id='md3-unlock-error' hidden></div>
+    <div class='md3-modal__actions'>
+      <button class='md3-btn md3-btn--text' data-close='1'>Отмена</button>
+      <button class='md3-btn md3-btn--filled' id='md3-unlock-submit'>Открыть сессию</button>
+    </div>
+  </div>
+</div>
 
 <div class='md3-shell'>
   <nav class='md3-rail' aria-label='Модули'>
@@ -1063,6 +1186,16 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
       <article class='md3-card md3-card--elevated md3-logs__card'>
         <pre id='md3-log-view' class='md3-log-view'>connecting…</pre>
       </article>
+    </section>
+
+    <section class='md3-section' id='catalog'>
+      <header class='md3-section__header'>
+        <h2><span class='material-symbols-outlined'>storefront</span>Каталог модулей</h2>
+        <span class='md3-section__hint' id='md3-catalog-hint'>загрузка…</span>
+      </header>
+      <div class='md3-card-grid' id='md3-catalog-grid'>
+        <div class='md3-empty md3-catalog__loading'>Загружаем каталог…</div>
+      </div>
     </section>
 
     <section class='md3-section' id='accounts'>
@@ -1262,6 +1395,196 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
     flushView();
   }});
 }})();
+
+// ---- catalog & unlock-modal ----
+(function() {{
+  const lockBtn = document.getElementById('md3-lock-toggle');
+  const lockIcon = document.getElementById('md3-lock-icon');
+  const modal = document.getElementById('md3-unlock-modal');
+  const desc = document.getElementById('md3-unlock-desc');
+  const passInput = document.getElementById('md3-unlock-pass');
+  const errBox = document.getElementById('md3-unlock-error');
+  const submitBtn = document.getElementById('md3-unlock-submit');
+  const grid = document.getElementById('md3-catalog-grid');
+  const hint = document.getElementById('md3-catalog-hint');
+
+  let authState = {{ password_configured: false, unlocked: true }};
+  let pendingAction = null;
+
+  const refreshAuthIcon = () => {{
+    if (!authState.password_configured) {{
+      lockIcon.textContent = 'no_encryption';
+      lockBtn.title = 'Пароль не задан';
+      lockBtn.classList.remove('lock-unlocked');
+    }} else if (authState.unlocked) {{
+      lockIcon.textContent = 'lock_open';
+      lockBtn.title = 'Сессия открыта — клик чтобы закрыть';
+      lockIcon.classList.add('lock-unlocked');
+    }} else {{
+      lockIcon.textContent = 'lock';
+      lockBtn.title = 'Сессия закрыта — клик чтобы открыть';
+      lockIcon.classList.remove('lock-unlocked');
+    }}
+  }};
+
+  const fetchAuth = async () => {{
+    try {{
+      const r = await fetch('/api/auth/status', {{credentials: 'same-origin'}});
+      authState = await r.json();
+    }} catch (_) {{}}
+    refreshAuthIcon();
+  }};
+
+  const openModal = (action, message) => {{
+    pendingAction = action;
+    desc.textContent = message || 'Введите пароль для опасных действий.';
+    errBox.hidden = true; errBox.textContent = '';
+    passInput.value = '';
+    modal.hidden = false;
+    setTimeout(() => passInput.focus(), 50);
+  }};
+  const closeModal = () => {{
+    modal.hidden = true;
+    pendingAction = null;
+  }};
+
+  modal.addEventListener('click', (e) => {{
+    if (e.target.dataset && e.target.dataset.close === '1') closeModal();
+  }});
+  document.addEventListener('keydown', (e) => {{
+    if (!modal.hidden && e.key === 'Escape') closeModal();
+  }});
+
+  submitBtn.addEventListener('click', async () => {{
+    const password = passInput.value;
+    if (!password) {{ errBox.textContent = 'Введите пароль.'; errBox.hidden = false; return; }}
+    submitBtn.disabled = true;
+    try {{
+      const fd = new FormData(); fd.append('password', password);
+      const r = await fetch('/api/auth/unlock', {{method: 'POST', body: fd, credentials: 'same-origin'}});
+      const data = await r.json().catch(() => ({{}}));
+      if (!r.ok || data.ok !== true) {{
+        errBox.textContent = data.reason === 'invalid' ? 'Неверный пароль.' : 'Не удалось открыть сессию.';
+        errBox.hidden = false;
+        return;
+      }}
+      authState.unlocked = true;
+      refreshAuthIcon();
+      const action = pendingAction;
+      closeModal();
+      if (typeof action === 'function') action();
+    }} finally {{
+      submitBtn.disabled = false;
+    }}
+  }});
+  passInput.addEventListener('keydown', (e) => {{ if (e.key === 'Enter') submitBtn.click(); }});
+
+  lockBtn.addEventListener('click', async () => {{
+    if (!authState.password_configured) {{
+      alert('Пароль не задан. Запустите бот в консоли — он попросит установить пароль при старте.');
+      return;
+    }}
+    if (authState.unlocked) {{
+      await fetch('/api/auth/lock', {{method: 'POST', credentials: 'same-origin'}});
+      authState.unlocked = false;
+      refreshAuthIcon();
+    }} else {{
+      openModal(null, 'Откройте сессию, чтобы выполнять опасные действия.');
+    }}
+  }});
+
+  // ---- catalog ----
+  const renderCard = (mod) => {{
+    const card = document.createElement('article');
+    card.className = 'md3-catalog__card';
+    const tags = (mod.tags || []).map(t => `<span class="md3-catalog__tag">${{t}}</span>`).join('');
+    const badge = mod.installed
+      ? '<span class="md3-badge md3-badge--installed"><span class="material-symbols-outlined" style="font-size:14px">check_circle</span>Установлен</span>'
+      : '<span class="md3-badge md3-badge--available">Доступен</span>';
+    card.innerHTML = `
+      <div class='md3-catalog__head'>
+        <div>
+          <h3 class='md3-catalog__title'>${{mod.name}}</h3>
+          <div class='md3-catalog__meta'>v${{mod.version}}${{mod.author ? ' · ' + mod.author : ''}}</div>
+        </div>
+        ${{badge}}
+      </div>
+      <p class='md3-catalog__desc'>${{mod.description || ''}}</p>
+      <div class='md3-catalog__tags'>${{tags}}</div>
+      <div class='md3-catalog__actions'>
+        <button class='md3-btn md3-btn--filled' data-action='install' data-name='${{mod.name}}' ${{mod.installed ? 'disabled' : ''}}>
+          <span class='material-symbols-outlined'>download</span><span>${{mod.installed ? 'Установлено' : 'Установить'}}</span>
+        </button>
+        ${{mod.installed
+          ? `<button class='md3-btn md3-btn--text' data-action='uninstall' data-name='${{mod.name}}'><span class='material-symbols-outlined'>delete</span><span>Удалить</span></button>`
+          : ''}}
+      </div>
+    `;
+    return card;
+  }};
+
+  const loadCatalog = async () => {{
+    try {{
+      const r = await fetch('/api/catalog', {{credentials: 'same-origin'}});
+      if (!r.ok) throw new Error('http ' + r.status);
+      const data = await r.json();
+      grid.innerHTML = '';
+      if (!data.modules || !data.modules.length) {{
+        grid.innerHTML = '<div class="md3-empty">Каталог пуст. Задайте <code>MAX_CATALOG_URL</code> или отредактируйте <code>catalog.json</code>.</div>';
+        hint.textContent = '0 модулей';
+        return;
+      }}
+      data.modules.forEach(m => grid.appendChild(renderCard(m)));
+      hint.textContent = `${{data.modules.length}} модулей · источник: ${{data.source || 'локальный'}}`;
+    }} catch (e) {{
+      grid.innerHTML = '<div class="md3-empty">Не удалось загрузить каталог.</div>';
+      hint.textContent = 'offline';
+    }}
+  }};
+
+  const callInstall = async (name) => {{
+    const fd = new FormData(); fd.append('name', name);
+    const r = await fetch('/api/catalog/install', {{method: 'POST', body: fd, credentials: 'same-origin'}});
+    const data = await r.json().catch(() => ({{}}));
+    if (r.status === 403) return 'locked';
+    if (!r.ok || data.ok !== true) return 'error:' + (data.error || data.reason || r.status);
+    return 'ok:' + data.status;
+  }};
+  const callUninstall = async (name) => {{
+    const fd = new FormData(); fd.append('name', name);
+    const r = await fetch('/api/catalog/uninstall', {{method: 'POST', body: fd, credentials: 'same-origin'}});
+    const data = await r.json().catch(() => ({{}}));
+    if (r.status === 403) return 'locked';
+    if (!r.ok || data.ok !== true) return 'error:' + (data.error || data.reason || r.status);
+    return 'ok';
+  }};
+
+  grid.addEventListener('click', async (e) => {{
+    const btn = e.target.closest('button[data-action]');
+    if (!btn) return;
+    const name = btn.dataset.name;
+    const action = btn.dataset.action;
+    btn.disabled = true;
+    const exec = async () => {{
+      let res;
+      if (action === 'install') res = await callInstall(name);
+      else if (action === 'uninstall') res = await callUninstall(name);
+      else res = 'error:unknown';
+      if (res === 'locked') {{
+        openModal(exec, action === 'install' ? `Введите пароль, чтобы установить «${{name}}».` : `Введите пароль, чтобы удалить «${{name}}».`);
+      }} else if (res.startsWith('error:')) {{
+        alert('Ошибка: ' + res.slice(6));
+        btn.disabled = false;
+      }} else {{
+        await loadCatalog();
+      }}
+    }};
+    await exec();
+  }});
+
+  fetchAuth();
+  loadCatalog();
+}})();
 </script>
 </body>
 </html>
@@ -1269,6 +1592,8 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
         return web.Response(text=html_page, content_type="text/html")
 
     async def add_account(self, request: web.Request) -> web.Response:
+        if not self._is_request_unlocked(request):
+            raise web.HTTPFound("/?error=locked")
         data = await request.post()
         label = (data.get("label") or "").strip()
         phone = (data.get("phone") or "").strip()
@@ -1367,6 +1692,114 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
             log_buffer.unsubscribe(queue)
         return response
 
+    # ----------------------------- catalog & auth endpoints ---------------
+
+    UNLOCK_COOKIE = "max_unlock"
+
+    def _is_request_unlocked(self, request: web.Request) -> bool:
+        if not self.config_store.data.dangerous_password_hash:
+            return True
+        token = request.cookies.get(self.UNLOCK_COOKIE)
+        return session_manager.is_valid(token)
+
+    async def auth_status(self, request: web.Request) -> web.Response:
+        return web.json_response({
+            "password_configured": bool(self.config_store.data.dangerous_password_hash),
+            "unlocked": self._is_request_unlocked(request),
+            "active_sessions": session_manager.active_count(),
+        })
+
+    async def auth_unlock(self, request: web.Request) -> web.Response:
+        data = await request.post()
+        password = (data.get("password") or "").strip()
+        if not self.config_store.data.dangerous_password_hash:
+            return web.json_response({"ok": True, "reason": "no-password-configured"})
+        if not password:
+            return web.json_response({"ok": False, "reason": "empty"}, status=400)
+        ok = verify_password(
+            password,
+            self.config_store.data.dangerous_password_hash,
+            self.config_store.data.dangerous_password_salt,
+        )
+        if not ok:
+            logger.warning("Web UI unlock: неверный пароль")
+            return web.json_response({"ok": False, "reason": "invalid"}, status=401)
+        session = session_manager.create(label="webui")
+        response = web.json_response({"ok": True, "expires_in": session_manager.ttl})
+        response.set_cookie(
+            self.UNLOCK_COOKIE,
+            session.token,
+            max_age=session_manager.ttl,
+            httponly=True,
+            samesite="Strict",
+        )
+        logger.info("Web UI unlock: сессия открыта")
+        return response
+
+    async def auth_lock(self, request: web.Request) -> web.Response:
+        token = request.cookies.get(self.UNLOCK_COOKIE)
+        session_manager.revoke(token)
+        response = web.json_response({"ok": True})
+        response.del_cookie(self.UNLOCK_COOKIE)
+        return response
+
+    async def catalog_endpoint(self, _: web.Request) -> web.Response:
+        catalog = load_catalog()
+        return web.json_response({
+            "version": catalog.version,
+            "source": catalog.source,
+            "modules": annotate_installed(catalog, MODULES_DIR),
+        })
+
+    async def catalog_install(self, request: web.Request) -> web.Response:
+        if not self._is_request_unlocked(request):
+            return web.json_response({"ok": False, "reason": "locked"}, status=403)
+        data = await request.post()
+        name = (data.get("name") or "").strip()
+        if not name:
+            return web.json_response({"ok": False, "reason": "name required"}, status=400)
+        catalog = load_catalog()
+        entry: CatalogEntry | None = next(
+            (m for m in catalog.modules if m.name.lower() == name.lower()),
+            None,
+        )
+        if entry is None:
+            return web.json_response({"ok": False, "reason": "not-in-catalog"}, status=404)
+        result = install_module(entry, MODULES_DIR)
+        ok = result.status in {"installed", "up_to_date"}
+        body = {
+            "ok": ok,
+            "status": result.status,
+            "bytes_written": result.bytes_written,
+            "name": entry.name,
+            "filename": entry.filename,
+        }
+        if not ok:
+            body["error"] = result.error
+        if ok:
+            logger.info("Каталог: установлен %s (%s)", entry.name, result.status)
+        return web.json_response(body)
+
+    async def catalog_uninstall(self, request: web.Request) -> web.Response:
+        if not self._is_request_unlocked(request):
+            return web.json_response({"ok": False, "reason": "locked"}, status=403)
+        data = await request.post()
+        name = (data.get("name") or "").strip()
+        catalog = load_catalog()
+        entry = next(
+            (m for m in catalog.modules if m.name.lower() == name.lower()),
+            None,
+        )
+        filename = entry.filename if entry else (data.get("filename") or "").strip()
+        result = uninstall_module(filename, MODULES_DIR)
+        ok = result.status == "installed"
+        body = {"ok": ok, "status": result.status, "filename": filename}
+        if not ok:
+            body["error"] = result.error
+        if ok:
+            logger.info("Каталог: удалён %s", filename)
+        return web.json_response(body)
+
     async def start(self) -> str:
         if self.runner is not None:
             return f"http://{self.host}:{self.port}"
@@ -1376,6 +1809,12 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
         app.router.add_get("/api/stats", self.stats_endpoint)
         app.router.add_get("/api/logs", self.logs_history)
         app.router.add_get("/api/logs/stream", self.logs_stream)
+        app.router.add_get("/api/auth/status", self.auth_status)
+        app.router.add_post("/api/auth/unlock", self.auth_unlock)
+        app.router.add_post("/api/auth/lock", self.auth_lock)
+        app.router.add_get("/api/catalog", self.catalog_endpoint)
+        app.router.add_post("/api/catalog/install", self.catalog_install)
+        app.router.add_post("/api/catalog/uninstall", self.catalog_uninstall)
         app.router.add_post("/api/accounts", self.add_account)
         app.router.add_post("/api/config", self.update_config)
         self.runner = web.AppRunner(app)
@@ -1470,10 +1909,117 @@ async def try_login(client: MaxClient) -> None:
     account_store.add_or_update(AccountEntry(label="main", phone=phone, state="authorized", device_id=client.device_id, token=token))
 
 
+_TG_UNLOCKED: dict[str, float] = {}
+
+
+def _tg_session_active() -> bool:
+    """Активна ли в Telegram-канале unlock-сессия (одна на бот)."""
+    expires = _TG_UNLOCKED.get("default")
+    if expires is None:
+        return False
+    if expires < time.time():
+        _TG_UNLOCKED.pop("default", None)
+        return False
+    return True
+
+
+async def _ensure_unlocked(client: MaxClient, dst_chat: int, message_id: int, cmd: str) -> bool:
+    """Проверяет, можно ли выполнять опасную команду. Если нет — отвечает в чат."""
+    if cmd == "unlock":
+        return True
+    if not config_store.data.dangerous_password_hash:
+        # Пароль не задан — пропускаем (например, бот пока запущен впервые без сетапа).
+        return True
+    if _tg_session_active():
+        return True
+    await edit_message(
+        client,
+        dst_chat,
+        message_id,
+        "🔒 Команда требует unlock. Сначала выполните <code>.unlock &lt;пароль&gt;</code> "
+        "(сессия активна 10 минут).",
+    )
+    return False
+
+
 async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message_id: int, cmd: str, arg: str) -> bool:
     api = MaxApiExtensions(client)
     ctx = BotContext(client=client, registry=module_registry, api=api, config=config_store)
     destination_chat = resolve_destination_chat(packet.get("payload", {}), chat_id)
+
+    # ---- dangerous-команды требуют активную unlock-сессию ----
+    if is_dangerous(cmd):
+        ok = await _ensure_unlocked(client, destination_chat, message_id, cmd)
+        if not ok:
+            return True
+
+    if cmd == "unlock":
+        if not config_store.data.dangerous_password_hash:
+            await edit_message(client, destination_chat, message_id, "Пароль не задан — unlock не нужен.")
+            return True
+        if not arg:
+            await edit_message(client, destination_chat, message_id, "Использование: <code>.unlock &lt;пароль&gt;</code>")
+            return True
+        if verify_password(arg, config_store.data.dangerous_password_hash, config_store.data.dangerous_password_salt):
+            _TG_UNLOCKED["default"] = time.time() + 600
+            await edit_message(client, destination_chat, message_id, "🔓 Сессия открыта на 10 минут.")
+            logger.info("Dangerous-actions сессия открыта (Telegram).")
+        else:
+            await edit_message(client, destination_chat, message_id, "❌ Неверный пароль.")
+            logger.warning("Неверный пароль .unlock от Telegram.")
+        return True
+
+    if cmd == "lock":
+        _TG_UNLOCKED.pop("default", None)
+        await edit_message(client, destination_chat, message_id, "🔒 Сессия закрыта.")
+        return True
+
+    if cmd == "catalog":
+        catalog = load_catalog()
+        rows = annotate_installed(catalog, MODULES_DIR)
+        if not rows:
+            await edit_message(client, destination_chat, message_id, "Каталог пуст.")
+            return True
+        lines = [f"<b>Каталог модулей</b> ({catalog.source or 'локальный'})"]
+        for r in rows:
+            mark = "✅" if r["installed"] else "⬜"
+            lines.append(
+                f"{mark} <b>{html.escape(r['name'])}</b> v{html.escape(r['version'])} — "
+                f"{html.escape(r['description'])}"
+            )
+        lines.append("\nУстановить: <code>.installmod &lt;name&gt;</code>")
+        await edit_message(client, destination_chat, message_id, "\n".join(lines))
+        return True
+
+    if cmd == "installmod":
+        target_name = arg.strip()
+        if not target_name:
+            await edit_message(client, destination_chat, message_id, "Использование: <code>.installmod &lt;name&gt;</code>")
+            return True
+        catalog = load_catalog()
+        entry = next((m for m in catalog.modules if m.name.lower() == target_name.lower()), None)
+        if not entry:
+            await edit_message(client, destination_chat, message_id, f"Модуль <code>{html.escape(target_name)}</code> не найден в каталоге.")
+            return True
+        result = install_module(entry, MODULES_DIR)
+        if result.status == "installed":
+            await edit_message(client, destination_chat, message_id, f"📦 {html.escape(entry.name)} установлен ({result.bytes_written} B). Перезапустите бот для активации.")
+        elif result.status == "up_to_date":
+            await edit_message(client, destination_chat, message_id, f"📦 {html.escape(entry.name)} — уже установлен (актуальная версия).")
+        else:
+            await edit_message(client, destination_chat, message_id, f"❌ Ошибка установки: <code>{html.escape(result.error)}</code>")
+        return True
+
+    if cmd == "uninstallmod":
+        catalog = load_catalog()
+        entry = next((m for m in catalog.modules if m.name.lower() == arg.strip().lower()), None)
+        filename = entry.filename if entry else arg.strip()
+        result = uninstall_module(filename, MODULES_DIR)
+        if result.status == "installed":
+            await edit_message(client, destination_chat, message_id, f"🗑 {html.escape(filename)} удалён.")
+        else:
+            await edit_message(client, destination_chat, message_id, f"❌ {html.escape(result.error)}")
+        return True
 
     if cmd in {"modules", "ml"}:
         await edit_message(client, destination_chat, message_id, module_registry.render_modules())

@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "source": "Max-Userbot built-in catalog",
+  "modules": [
+    {
+      "name": "GeminiExample",
+      "description": "Минимальный клиент Google Gemini API: команды .g/.gem, ротация моделей через .gmodel. Конфиг: api_key, model, temperature, system_prompt.",
+      "version": "1.0",
+      "author": "Max-Userbot",
+      "filename": "gemini_example.py",
+      "url": "https://raw.githubusercontent.com/Hshdhr1/Max-Userbot/main/modules/examples/gemini_example.py",
+      "tags": ["ai", "example"]
+    },
+    {
+      "name": "KeyScannerExample",
+      "description": "Watcher, ловящий API-ключи в чатах (openai/anthropic/google/groq/...). Команды .ksauto, .ksstat, .kscan, .ksclear.",
+      "version": "1.0",
+      "author": "Max-Userbot",
+      "filename": "keyscanner_example.py",
+      "url": "https://raw.githubusercontent.com/Hshdhr1/Max-Userbot/main/modules/examples/keyscanner_example.py",
+      "tags": ["security", "example", "scanner"]
+    }
+  ]
+}
