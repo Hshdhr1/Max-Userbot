@@ -22,12 +22,12 @@
     },
     {
       "name": "SiteDump",
-      "description": ".sdump <url> — рендерит страницу в PDF (playwright / weasyprint), публикует на 0x0.st и присылает ссылку в чат.",
-      "version": "1.0",
+      "description": ".sdump <url> — одна страница в PDF; .sdump full <url> — полный обход всех внутренних ссылок и склейка в один PDF (playwright/weasyprint + pypdf).",
+      "version": "1.1",
       "author": "Max-Userbot",
       "filename": "site_dump.py",
       "url": "https://raw.githubusercontent.com/Hshdhr1/Max-Userbot/main/modules/examples/site_dump.py",
-      "tags": ["pdf", "render", "tools"]
+      "tags": ["pdf", "render", "tools", "crawler"]
     }
   ]
 }

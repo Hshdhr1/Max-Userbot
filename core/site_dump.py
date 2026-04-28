@@ -23,9 +23,11 @@ import logging
 import re
 import socket
 import time
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urldefrag, urljoin, urlparse
 
 import aiohttp
 
@@ -278,6 +280,213 @@ async def publish_pdf(path: Path, provider: str = "auto") -> UploadResult:
     raise SiteDumpError(f"Неизвестный provider: {provider!r}")
 
 
+# ----------------------------- multi-page crawl -----------------------------
+
+
+_SKIP_EXTENSIONS: tuple[str, ...] = (
+    ".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico",
+    ".pdf", ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar",
+    ".mp3", ".mp4", ".webm", ".mov", ".avi", ".wav", ".flac",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot",
+)
+
+
+class _LinkExtractor(HTMLParser):
+    """Очень маленький HTML-парсер на html.parser, без внешних зависимостей."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.links: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() != "a":
+            return
+        for name, value in attrs:
+            if name.lower() == "href" and value:
+                self.links.append(value)
+
+
+def _normalize_link(base: str, raw: str) -> str | None:
+    """Превращает href в абсолютный URL без фрагмента; возвращает None если линк не http(s)."""
+    raw = (raw or "").strip()
+    if not raw or raw.startswith(("javascript:", "mailto:", "tel:", "#")):
+        return None
+    absolute = urljoin(base, raw)
+    absolute, _frag = urldefrag(absolute)
+    parsed = urlparse(absolute)
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    if any(parsed.path.lower().endswith(ext) for ext in _SKIP_EXTENSIONS):
+        return None
+    return absolute
+
+
+async def _fetch_html(session: aiohttp.ClientSession, url: str, timeout: int) -> str:
+    async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout), allow_redirects=True) as resp:
+        # Не пытаемся парсить бинарные ответы как HTML.
+        ctype = (resp.headers.get("Content-Type") or "").lower()
+        if "html" not in ctype and "xml" not in ctype:
+            return ""
+        return await resp.text(errors="replace")
+
+
+async def crawl_pages(
+    start_url: str,
+    max_pages: int = 30,
+    max_depth: int = 2,
+    same_domain_only: bool = True,
+    timeout: int = 15,
+) -> list[str]:
+    """BFS по ссылкам, возвращает список URL'ов в порядке обхода (включая стартовый).
+
+    Применяет ту же SSRF-валидацию, что и `validate_url` — для каждого URL,
+    включая внутренние ссылки. Не уходит в субдомены если `same_domain_only`.
+    Игнорирует расширения статики (CSS/JS/изображения/архивы).
+    """
+    start_url = validate_url(start_url)
+    start_host = urlparse(start_url).hostname or ""
+    seen: set[str] = {start_url}
+    queue: deque[tuple[str, int]] = deque([(start_url, 0)])
+    out: list[str] = []
+
+    timeout_obj = aiohttp.ClientTimeout(total=timeout)
+    async with aiohttp.ClientSession(timeout=timeout_obj) as session:
+        while queue and len(out) < max_pages:
+            url, depth = queue.popleft()
+            out.append(url)
+            if depth >= max_depth:
+                continue
+            try:
+                html_text = await _fetch_html(session, url, timeout)
+            except Exception as e:
+                logger.warning("crawl: skip %s: %r", url, e)
+                continue
+            if not html_text:
+                continue
+            extractor = _LinkExtractor()
+            try:
+                extractor.feed(html_text)
+            except Exception:
+                continue
+            for raw in extractor.links:
+                link = _normalize_link(url, raw)
+                if not link or link in seen:
+                    continue
+                if same_domain_only:
+                    host = urlparse(link).hostname or ""
+                    if host != start_host:
+                        continue
+                # SSRF-проверка для каждого нового URL.
+                try:
+                    validate_url(link)
+                except UrlValidationError:
+                    continue
+                seen.add(link)
+                queue.append((link, depth + 1))
+                if len(seen) >= max_pages * 4:
+                    # Бортик чтобы не разогнать seen в миллионах ссылок.
+                    break
+    return out
+
+
+def merge_pdfs(parts: list[Path], output: Path) -> Path:
+    """Склеивает несколько PDF'ов в один. Бросает RendererUnavailableError если нет pypdf."""
+    try:
+        from pypdf import PdfWriter  # type: ignore
+    except ImportError as e:
+        raise RendererUnavailableError(
+            "pypdf не установлен. Поставьте: pip install pypdf"
+        ) from e
+
+    if not parts:
+        raise SiteDumpError("merge_pdfs: список страниц пустой")
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    writer = PdfWriter()
+    try:
+        for p in parts:
+            if not p.exists() or p.stat().st_size == 0:
+                continue
+            writer.append(str(p))
+        with open(output, "wb") as f:
+            writer.write(f)
+    finally:
+        writer.close()
+    return output
+
+
+@dataclass
+class FullSiteResult:
+    pdf_path: Path
+    pages: list[str] = field(default_factory=list)
+    rendered: int = 0
+    skipped: int = 0
+
+
+async def render_full_site(
+    start_url: str,
+    out_dir: Path | str = DEFAULT_DOWNLOADS_DIR,
+    opts: RenderOptions | None = None,
+    renderer: str = "auto",
+    max_pages: int = 30,
+    max_depth: int = 2,
+    same_domain_only: bool = True,
+) -> FullSiteResult:
+    """Краулит, рендерит каждую страницу в PDF, склеивает в один файл."""
+    start_url = validate_url(start_url)
+    opts = opts or RenderOptions()
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    pages = await crawl_pages(
+        start_url,
+        max_pages=max_pages,
+        max_depth=max_depth,
+        same_domain_only=same_domain_only,
+        timeout=opts.timeout,
+    )
+    if not pages:
+        raise SiteDumpError("Краулер не нашёл ни одной страницы.")
+
+    parts_dir = out_dir / f"sdump-parts-{int(time.time())}"
+    parts_dir.mkdir(parents=True, exist_ok=True)
+
+    parts: list[Path] = []
+    skipped = 0
+    for page in pages:
+        try:
+            actual = await render_pdf(page, out_dir=parts_dir, opts=opts, preferred=renderer)
+            if actual.exists() and actual.stat().st_size > 0:
+                parts.append(actual)
+            else:
+                skipped += 1
+        except SiteDumpError as e:
+            logger.warning("render_full_site: skip %s: %s", page, e)
+            skipped += 1
+        except Exception as e:  # noqa: BLE001
+            logger.warning("render_full_site: skip %s: %r", page, e)
+            skipped += 1
+
+    if not parts:
+        raise SiteDumpError("Не удалось отрендерить ни одной страницы.")
+
+    merged = out_dir / safe_filename_for(start_url).replace("sdump-", "sdump-full-", 1)
+    merge_pdfs(parts, merged)
+
+    # Чистим за собой временные части, оставляем только финальный PDF.
+    for p in parts:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+    try:
+        parts_dir.rmdir()
+    except OSError:
+        pass
+
+    return FullSiteResult(pdf_path=merged, pages=pages, rendered=len(parts), skipped=skipped)
+
+
 # ------------------------------- pipeline ----------------------------------
 
 
@@ -287,6 +496,7 @@ class DumpResult:
     url: str
     provider: str
     bytes: int
+    pages: int = 1
 
 
 async def dump_url(
@@ -295,7 +505,36 @@ async def dump_url(
     opts: RenderOptions | None = None,
     renderer: str = "auto",
     upload: str = "auto",
+    mode: str = "single",
+    max_pages: int = 30,
+    max_depth: int = 2,
+    same_domain_only: bool = True,
 ) -> DumpResult:
+    """Главный entry: single page или full site → PDF → publish."""
+    if mode == "full":
+        result = await render_full_site(
+            url,
+            out_dir=out_dir,
+            opts=opts,
+            renderer=renderer,
+            max_pages=max_pages,
+            max_depth=max_depth,
+            same_domain_only=same_domain_only,
+        )
+        pub = await publish_pdf(result.pdf_path, provider=upload)
+        return DumpResult(
+            pdf_path=result.pdf_path,
+            url=pub.url,
+            provider=pub.provider,
+            bytes=result.pdf_path.stat().st_size,
+            pages=result.rendered,
+        )
     pdf = await render_pdf(url, out_dir=out_dir, opts=opts, preferred=renderer)
     pub = await publish_pdf(pdf, provider=upload)
-    return DumpResult(pdf_path=pdf, url=pub.url, provider=pub.provider, bytes=pdf.stat().st_size)
+    return DumpResult(
+        pdf_path=pdf,
+        url=pub.url,
+        provider=pub.provider,
+        bytes=pdf.stat().st_size,
+        pages=1,
+    )
