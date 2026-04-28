@@ -470,7 +470,7 @@ async def render_full_site(
     if not parts:
         raise SiteDumpError("Не удалось отрендерить ни одной страницы.")
 
-    merged = out_dir / safe_filename_for(start_url).replace("sdump-", "sdump-full-")
+    merged = out_dir / safe_filename_for(start_url).replace("sdump-", "sdump-full-", 1)
     merge_pdfs(parts, merged)
 
     # Чистим за собой временные части, оставляем только финальный PDF.
