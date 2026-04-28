@@ -2039,6 +2039,9 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
 
     async def telemetry_status(self, _: web.Request) -> web.Response:
         cfg = self.config_store.data
+        # Load один раз — двойной .load() читает JSON-файл дважды и может
+        # дать рассинхрон если файл поменялся между чтениями.
+        accounts = self.account_store.load()
         return web.json_response({
             "enabled": bool(cfg.telemetry_enabled),
             "endpoint": cfg.telemetry_endpoint or "",
@@ -2050,10 +2053,8 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
                 modules_count=len(self.registry.modules),
                 commands_count=sum(len(m.commands) for m in self.registry.modules.values()),
                 watchers_count=len(self.registry.packet_watchers),
-                accounts_total=len(self.account_store.load()),
-                accounts_authorized=sum(
-                    1 for a in self.account_store.load() if a.state == "authorized"
-                ),
+                accounts_total=len(accounts),
+                accounts_authorized=sum(1 for a in accounts if a.state == "authorized"),
                 packets_in=stats.packets_in,
                 packets_out=stats.packets_out,
                 commands_processed=stats.commands_handled,
@@ -2534,6 +2535,7 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
                 f"Endpoint: <code>{html.escape(cfg.telemetry_endpoint or '(пусто)')}</code>")
             return True
         if sub == "preview":
+            accounts = account_store.load()
             payload = telemetry_mod.build_payload(
                 anon_id=cfg.telemetry_anon_id or "(not generated yet)",
                 version=os.getenv("MAX_VERSION", "max-userbot/dev"),
@@ -2541,8 +2543,8 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
                 modules_count=len(module_registry.modules),
                 commands_count=sum(len(m.commands) for m in module_registry.modules.values()),
                 watchers_count=len(module_registry.packet_watchers),
-                accounts_total=len(account_store.load()),
-                accounts_authorized=sum(1 for a in account_store.load() if a.state == "authorized"),
+                accounts_total=len(accounts),
+                accounts_authorized=sum(1 for a in accounts if a.state == "authorized"),
                 packets_in=stats.packets_in,
                 packets_out=stats.packets_out,
                 commands_processed=stats.commands_handled,
@@ -2783,6 +2785,7 @@ async def telemetry_loop(interval: int = 3600) -> None:
         try:
             cfg = config_store.data
             if cfg.telemetry_enabled and cfg.telemetry_endpoint and cfg.telemetry_anon_id:
+                accounts = account_store.load()
                 payload = telemetry_mod.build_payload(
                     anon_id=cfg.telemetry_anon_id,
                     version=os.getenv("MAX_VERSION", "max-userbot/dev"),
@@ -2790,10 +2793,8 @@ async def telemetry_loop(interval: int = 3600) -> None:
                     modules_count=len(module_registry.modules),
                     commands_count=sum(len(m.commands) for m in module_registry.modules.values()),
                     watchers_count=len(module_registry.packet_watchers),
-                    accounts_total=len(account_store.load()),
-                    accounts_authorized=sum(
-                        1 for a in account_store.load() if a.state == "authorized"
-                    ),
+                    accounts_total=len(accounts),
+                    accounts_authorized=sum(1 for a in accounts if a.state == "authorized"),
                     packets_in=stats.packets_in,
                     packets_out=stats.packets_out,
                     commands_processed=stats.commands_handled,
