@@ -1940,8 +1940,9 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
         })
 
     async def catalog_install(self, request: web.Request) -> web.Response:
-        if not self._is_request_unlocked(request):
-            return web.json_response({"ok": False, "reason": "locked"}, status=403)
+        # Установка модуля из каталога не требует unlock: файл падает в
+        # `modules/`, проходит threat_scan и исполняется только после явного
+        # перезапуска. Опасным считается только выполнение кода внутри модуля.
         data = await request.post()
         name = (data.get("name") or "").strip()
         if not name:
@@ -1969,8 +1970,7 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
         return web.json_response(body)
 
     async def catalog_uninstall(self, request: web.Request) -> web.Response:
-        if not self._is_request_unlocked(request):
-            return web.json_response({"ok": False, "reason": "locked"}, status=403)
+        # Удаление модуля тоже не требует unlock — это обратная операция.
         data = await request.post()
         name = (data.get("name") or "").strip()
         catalog = load_catalog()
@@ -2000,8 +2000,7 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
         )
 
     async def threat_remove(self, request: web.Request) -> web.Response:
-        if not self._is_request_unlocked(request):
-            return web.json_response({"ok": False, "reason": "locked"}, status=403)
+        # Удаление модуля по флагу threat_scan — обратная операция, не опасна.
         data = await request.post()
         filename = (data.get("filename") or "").strip()
         # filename защищён внутри uninstall_module — никаких path traversal.

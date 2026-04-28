@@ -21,6 +21,15 @@
       "tags": ["security", "example", "scanner"]
     },
     {
+      "name": "EditTracker",
+      "description": "Логирует редактирования и удаления чужих сообщений в чате (opcode 128 status). Команды: .edits, .deletes, .ettop, .etclear.",
+      "version": "1.0",
+      "author": "Max-Userbot",
+      "filename": "edit_tracker.py",
+      "url": "https://raw.githubusercontent.com/Hshdhr1/Max-Userbot/main/modules/examples/edit_tracker.py",
+      "tags": ["watcher", "moderation", "tools"]
+    },
+    {
       "name": "SiteDump",
       "description": ".sdump <url> — рендерит страницу в PDF (playwright / weasyprint), публикует на 0x0.st и присылает ссылку в чат.",
       "version": "1.0",

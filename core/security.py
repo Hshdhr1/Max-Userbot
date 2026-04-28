@@ -142,13 +142,28 @@ session_manager = SessionManager(ttl_seconds=int(os.getenv("MAX_UNLOCK_TTL", "60
 
 
 DANGEROUS_COMMANDS: set[str] = {
+    # Произвольное выполнение кода / shell.
     "eval",
     "exec",
     "terminal",
     "shell",
     "sh",
-    # download / load / unload module — все алиасы должны быть здесь, иначе
-    # `.lm` / `.dlmod` / `.ulm` обходят unlock-проверку.
+    # Аккаунты — могут привести к угону сессии и разлогину.
+    "addaccount",
+    "loginacc",
+    "deleteaccount",
+    "delaccount",
+    "removeaccount",
+    "lock",
+    "unlock",  # сама команда unlock не должна вечно требовать unlock'а — обработана отдельно
+}
+
+# Установка / выгрузка модулей сама по себе НЕ опасна: модуль попадает
+# в каталог `modules/`, проходит сканер угроз (`core.threat_scan`) и не
+# исполняется автоматически до перезапуска. Опасным считается только то,
+# что модуль внутри себя пытается сделать (например, `os.system('fallocate
+# -l 19G')` или `subprocess(... shell=True)`) — это ловит сканер.
+SAFE_BUT_RECENTLY_DANGEROUS: set[str] = {
     "dlm",
     "dlmod",
     "loadmod",
@@ -158,13 +173,6 @@ DANGEROUS_COMMANDS: set[str] = {
     "installmod",
     "uninstallmod",
     "rmmod",
-    "addaccount",
-    "loginacc",
-    "deleteaccount",
-    "delaccount",
-    "removeaccount",
-    "lock",
-    "unlock",  # сама команда unlock не должна вечно требовать unlock'а — обработана отдельно
 }
 
 
