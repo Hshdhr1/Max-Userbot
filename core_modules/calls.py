@@ -4,7 +4,6 @@
 """
 
 import html
-import re
 
 from userbot import BotModule, ModuleCommand
 

@@ -4,19 +4,200 @@
 """
 
 import asyncio
+import getpass
+import importlib.util
 import logging
+import os
+import signal
+import sys
 from pathlib import Path
 
+from core import loader as core_loader
+from core.db import db as kv_db
+from core.multiaccount import AccountEntry as MultiAccountEntry
 from core.multiaccount import multiaccount_manager
-from core.loader import get_registry
-from userbot import config_store, account_store, webui, weather_client
+from core.security import hash_password
+from userbot import (
+    SESSION_FILE,
+    account_store,
+    config_store,
+    module_registry,
+    on_packet,
+    webui,
+    weather_client,
+)
 
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%d.%m.%Y %H:%M:%S"
+    datefmt="%d.%m.%Y %H:%M:%S",
 )
 logger = logging.getLogger("max-userbot.main")
+
+CORE_MODULES_DIR = Path(__file__).resolve().parent / "core_modules"
+
+
+def _load_core_modules() -> None:
+    """Импортирует и регистрирует встроенные модули из ./core_modules/.
+
+    Поддерживается два API:
+    - старый: `setup(registry)`-функция в файле модуля.
+    - новый: класс(ы), наследующие `core.loader.Module` (Hikka-style) — будут
+      инстанциированы и зарегистрированы через `core_loader.discover_and_register`
+      (но без активного клиента — он подцепится при первом подходящем connect).
+    """
+    if not CORE_MODULES_DIR.exists():
+        return
+
+    for path in sorted(CORE_MODULES_DIR.glob("*.py")):
+        if path.name.startswith("_"):
+            continue
+        module_name = f"core_modules.{path.stem}"
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, path)
+            if spec is None or spec.loader is None:
+                continue
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            setup = getattr(mod, "setup", None)
+            if callable(setup):
+                setup(module_registry)
+                logger.info("Загружен core-модуль (legacy): %s", path.stem)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Не удалось загрузить core-модуль %s: %s", path.name, exc)
+
+
+async def _load_class_modules(client) -> None:
+    """Сканирует ./modules и ./core_modules на класс-модули нового API."""
+    seen_files: set[Path] = set()
+
+    candidates: list[Path] = []
+    for directory in (CORE_MODULES_DIR, Path("modules")):
+        if directory.exists():
+            for path in sorted(directory.rglob("*.py")):
+                if path.name.startswith("_"):
+                    continue
+                candidates.append(path)
+
+    for path in candidates:
+        if path in seen_files:
+            continue
+        seen_files.add(path)
+        module_name = f"_classmod_{path.stem}_{abs(hash(str(path))) % 100000}"
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, path)
+            if spec is None or spec.loader is None:
+                continue
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            instances = await core_loader.discover_and_register(
+                mod, module_registry, client, kv_db
+            )
+            if instances:
+                logger.info(
+                    "Загружено class-модулей из %s: %s",
+                    path.name,
+                    ", ".join(i.strings.get("name", type(i).__name__) for i in instances),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Не удалось загрузить class-модуль %s: %s", path.name, exc)
+
+
+def _migrate_legacy_session() -> None:
+    """Если есть max_session.txt от одиночного запуска — добавляем как аккаунт `main`."""
+    if not SESSION_FILE.exists():
+        return
+    if "main" in multiaccount_manager.accounts:
+        return
+    try:
+        raw = SESSION_FILE.read_text(encoding="utf-8").strip()
+        if "\n" not in raw:
+            return
+        device_id, token = raw.split("\n", maxsplit=1)
+    except OSError as exc:
+        logger.warning("Не удалось прочитать legacy session: %s", exc)
+        return
+
+    # Подбираем телефон из старого accounts.json (формат userbot.AccountStore).
+    phone = ""
+    for legacy in account_store.load():
+        if legacy.label.lower() == "main":
+            phone = legacy.phone
+            break
+
+    multiaccount_manager.accounts["main"] = MultiAccountEntry(
+        label="main",
+        phone=phone,
+        state="authorized" if token else "pending_auth",
+        device_id=device_id,
+        token=token,
+    )
+    multiaccount_manager._save_accounts()
+
+    # Также сохраняем в sessions/main.session — connect_account ожидает этот файл.
+    session_dir = Path("sessions")
+    session_dir.mkdir(exist_ok=True)
+    session_file = session_dir / "main.session"
+    if not session_file.exists():
+        import json
+
+        session_file.write_text(
+            json.dumps({"token": token, "device_id": device_id}),
+            encoding="utf-8",
+        )
+    logger.info("Legacy max_session.txt мигрирован в multi-account как 'main'")
+
+
+def _setup_dangerous_password() -> None:
+    """При первом запуске интерактивно запрашивает пароль для опасных действий.
+
+    Если у нас нет TTY (демонизированный запуск), просто пропускаем — пользователь
+    может задать `MAX_DANGEROUS_PASSWORD` через переменную окружения.
+    """
+    if config_store.data.dangerous_password_hash:
+        return
+
+    env_password = (os.getenv("MAX_DANGEROUS_PASSWORD") or "").strip()
+    if env_password:
+        hex_hash, hex_salt = hash_password(env_password)
+        config_store.data.dangerous_password_hash = hex_hash
+        config_store.data.dangerous_password_salt = hex_salt
+        config_store.save()
+        logger.info("Пароль для опасных действий установлен из MAX_DANGEROUS_PASSWORD.")
+        return
+
+    if not sys.stdin.isatty():
+        logger.warning(
+            "Пароль для опасных действий не задан. В TTY-режиме можно установить интерактивно, "
+            "либо передать через переменную MAX_DANGEROUS_PASSWORD."
+        )
+        return
+
+    print("\n=========================================================")
+    print("  Установите пароль для опасных действий")
+    print("  (eval/terminal/.dlm/install/uninstall/addaccount).")
+    print("  Введите пустую строку, чтобы пропустить — но тогда")
+    print("  опасные действия будут разрешены без подтверждения.")
+    print("=========================================================")
+    while True:
+        try:
+            pw1 = getpass.getpass("Пароль: ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if not pw1:
+            logger.info("Пароль не задан — опасные действия будут выполняться без проверки.")
+            return
+        pw2 = getpass.getpass("Повторите пароль: ")
+        if pw1 != pw2:
+            print("Пароли не совпадают. Попробуйте ещё раз.\n")
+            continue
+        hex_hash, hex_salt = hash_password(pw1)
+        config_store.data.dangerous_password_hash = hex_hash
+        config_store.data.dangerous_password_salt = hex_salt
+        config_store.save()
+        print("Пароль сохранён. Меняйте его командой .setpassword (или вручную в userbot_config.json).\n")
+        return
 
 
 async def main():
@@ -24,19 +205,36 @@ async def main():
     # Создаём директории
     Path("modules").mkdir(exist_ok=True)
     Path("sessions").mkdir(exist_ok=True)
-    
+
     # Загружаем конфиги
     config_store.load()
-    
+
+    # При первом запуске запрашиваем пароль для опасных действий.
+    _setup_dangerous_password()
+
+    # Регистрируем встроенные модули из ./core_modules (legacy setup(registry) API)
+    _load_core_modules()
+
+    # Регистрируем class-модули (Hikka-style) из ./core_modules и ./modules
+    # client здесь None — он становится доступен после connect_account, но команды
+    # уже зарегистрированы и будут диспатчиться корректно.
+    await _load_class_modules(client=None)
+
+    # Регистрируем callback по умолчанию, чтобы все аккаунты получали обработчик автоматически
+    multiaccount_manager.set_default_callback(on_packet)
+
+    # Миграция со старого max_session.txt
+    _migrate_legacy_session()
+
     # Запускаем Web UI
     web_url = await webui.start()
     logger.info(f"Web UI запущен: {web_url}")
-    
+
     # Подключаем все аккаунты
     await multiaccount_manager.connect_all()
-    
+
     active_accounts = multiaccount_manager.get_all_accounts()
-    
+
     if not active_accounts:
         logger.warning("Нет активных аккаунтов. Добавьте через Web UI или команды.")
         logger.info("Добавьте аккаунт командой: .addaccount <label> <phone>")
@@ -47,19 +245,31 @@ async def main():
         for acc in active_accounts:
             status = "✅ авторизован" if acc.authorized else "⏳ ожидает входа"
             logger.info(f"  • {acc.label} ({acc.phone}) - {status}")
-            
-            # Устанавливаем обработчик пакетов если аккаунт авторизован
-            if acc.authorized and acc.callback is None:
-                from userbot import on_packet
-                multiaccount_manager.set_callback(acc.label, on_packet)
-    
-    # Запускаем основной цикл
+
+    # Подготавливаем graceful shutdown по SIGINT/SIGTERM.
+    loop = asyncio.get_running_loop()
+    stop_event = asyncio.Event()
+
+    def _request_stop() -> None:
+        logger.info("Получен сигнал остановки, завершаемся...")
+        stop_event.set()
+
+    for sig_name in ("SIGINT", "SIGTERM"):
+        sig = getattr(signal, sig_name, None)
+        if sig is None:
+            continue
+        try:
+            loop.add_signal_handler(sig, _request_stop)
+        except (NotImplementedError, RuntimeError):
+            # Windows / окружения без поддержки add_signal_handler — оставляем дефолт.
+            pass
+
     try:
-        await asyncio.Future()
+        await stop_event.wait()
     except KeyboardInterrupt:
-        logger.info("Остановка по сигналу...")
+        logger.info("Остановка по KeyboardInterrupt...")
     finally:
-        # Отключаем все аккаунты
+        await core_loader.on_unload_all()
         await multiaccount_manager.disconnect_all()
         await webui.stop()
         await weather_client.close()
@@ -67,4 +277,8 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        # Подавляем шум при Ctrl+C — graceful shutdown уже выполнен внутри main().
+        pass

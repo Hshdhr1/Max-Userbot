@@ -1,5 +1,45 @@
 # Изменения в Max Userbot
 
+## 🛠️ Исправления багов и улучшения (текущий PR)
+
+### Исправлено
+- **Web UI больше не падает с 500.** `WebUIManager._module_panel` обращался к
+  отсутствующему атрибуту `BotModule.default_config` — добавлено поле и
+  defensive `getattr` для обратной совместимости.
+- **Команды `.addaccount`/`.call` теперь действительно работают.** Файлы из
+  `core_modules/` ранее не загружались — добавлен авто-импорт в `main.py`.
+- **`MultiAccountManager.connect_all`**: исправлен `zip` mismatch (раньше
+  результаты сопоставлялись с `self.accounts.keys()`, а не с тем подмножеством
+  меток, которое реально подключалось). Теперь также перечитывает `accounts.json`
+  на случай изменений через Web UI.
+- **`disconnect_account`** теперь действительно закрывает клиентское соединение
+  (`disconnect`/`close`/`stop`), а не просто удаляет запись.
+- **`set_callback`** не падает, если вызван вне работающего event loop.
+- **`.setprefix`** перестал падать на пустом/пробельном аргументе.
+- **`.gitignore`** очищен от тройных бэктиков на первой/последней строке (раньше
+  считались литеральными паттернами).
+- **`ConfigStore.load` / `AccountStore.load`** теперь устойчивы к битому JSON и
+  неизвестным/пропущенным полям.
+- **Удалены неиспользуемые импорты** в `core/loader.py`, `core/client_manager.py`,
+  `core_modules/calls.py`; устранён ошибочный f-string без подстановок.
+
+### Добавлено
+- **`.ping`** — встроенная команда: измеряет latency event loop и uptime.
+- **`/health`** — JSON health-check эндпоинт в Web UI (`status`, `uptime_seconds`,
+  `modules`, `accounts`).
+- **Автопривязка callback'а пакетов**: `MultiAccountManager.set_default_callback`
+  + автоматическая подписка после `connect_account` и `login_by_sms`.
+- **Graceful shutdown** в `main.py` через SIGINT/SIGTERM (`asyncio.Event`).
+- **Миграция** legacy-сессии из `max_session.txt` в multi-account `main` при
+  старте.
+- **Web UI add_account** теперь синхронизируется с `MultiAccountManager`, чтобы
+  добавленный через форму аккаунт был виден `connect_all`/командам.
+- **Smoke-тесты** в `tests/test_smoke.py` (8 тестов: ConfigStore, BotModule,
+  WebUIPanel, MultiAccountManager).
+- **CI workflow** `.github/workflows/ci.yml` — ruff + unittest на Python 3.10–3.12.
+
+---
+
 ## ✅ Выполнено
 
 ### 1. Мультиаккаунт система

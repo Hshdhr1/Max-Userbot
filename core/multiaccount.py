@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import inspect
 import json
 import logging
 from dataclasses import asdict, dataclass
@@ -45,12 +46,24 @@ class ActiveAccount:
 
 class MultiAccountManager:
     """Менеджер множественных аккаунтов."""
-    
+
     def __init__(self):
         self.accounts: dict[str, AccountEntry] = {}
         self.active_accounts: dict[str, ActiveAccount] = {}
+        # Callback по умолчанию для обработки входящих пакетов; устанавливается из main.py
+        # через set_default_callback(...). Используется для автоматической подписки
+        # вновь авторизованных аккаунтов.
+        self._default_callback: Callable | None = None
         self._load_accounts()
         SESSION_DIR.mkdir(exist_ok=True)
+
+    def set_default_callback(self, callback: Callable) -> None:
+        """Запоминаем callback, чтобы автоподписывать новые аккаунты при входе."""
+        self._default_callback = callback
+        # Применяем к уже подключённым аккаунтам, у которых нет callback.
+        for active in self.active_accounts.values():
+            if active.callback is None and active.authorized:
+                self.set_callback(active.label, callback)
     
     def _load_accounts(self) -> None:
         """Загрузка списка аккаунтов из файла."""
@@ -135,6 +148,8 @@ class MultiAccountManager:
         
         self.active_accounts[label] = active
         self._save_accounts()
+        if active.authorized and self._default_callback is not None:
+            self.set_callback(label, self._default_callback)
         return active
     
     async def login_by_sms(
@@ -172,7 +187,10 @@ class MultiAccountManager:
             entry.token = token
             entry.device_id = active.client.device_id
             self._save_accounts()
-            
+
+            if self._default_callback is not None and active.callback is None:
+                self.set_callback(label, self._default_callback)
+
             logger.info(f"[{label}] Вход по SMS успешен")
             return True
         except Exception as exc:
@@ -201,21 +219,49 @@ class MultiAccountManager:
         """Отключение аккаунта."""
         if label not in self.active_accounts:
             return False
-        
-        active = self.active_accounts[label]
-        # Здесь можно добавить очистку соединения
-        del self.active_accounts[label]
+
+        active = self.active_accounts.pop(label)
+        # Аккуратно пытаемся закрыть соединение клиента (имя метода может отличаться).
+        for method_name in ("disconnect", "close", "stop"):
+            method = getattr(active.client, method_name, None)
+            if callable(method):
+                try:
+                    result = method()
+                    # Любой awaitable: coroutine, asyncio.Future, Task, или
+                    # сторонние объекты с __await__ — все должны дождаться.
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[{label}] Ошибка при закрытии клиента: {exc}")
+                break
         logger.info(f"[{label}] Отключен")
         return True
     
     def set_callback(self, label: str, callback: Callable) -> bool:
-        """Установка обработчика пакетов для аккаунта."""
+        """Установка обработчика пакетов для аккаунта.
+
+        Регистрация callback на низкоуровневом клиенте выполняется асинхронно.
+        Если функция вызывается вне работающего event loop — просто запоминаем
+        callback на ActiveAccount и применим его при следующем подключении.
+        """
         if label not in self.active_accounts:
             return False
-        
+
         active = self.active_accounts[label]
         active.callback = callback
-        asyncio.create_task(active.client.set_callback(callback))
+
+        client_set_callback = getattr(active.client, "set_callback", None)
+        if not callable(client_set_callback):
+            return True
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # Нет запущенного цикла — клиентская подписка случится при следующем connect.
+            logger.debug(f"[{label}] set_callback вызван вне event loop; будет применён позже")
+            return True
+
+        loop.create_task(client_set_callback(callback))
         return True
     
     def get_account(self, label: str) -> ActiveAccount | None:
@@ -228,16 +274,18 @@ class MultiAccountManager:
     
     async def connect_all(self) -> None:
         """Подключение всех аккаунтов."""
-        tasks = []
-        for label in self.accounts:
-            if label not in self.active_accounts:
-                tasks.append(self.connect_account(label))
-        
-        if tasks:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for label, result in zip(self.accounts.keys(), results):
-                if isinstance(result, Exception):
-                    logger.error(f"Не удалось подключить {label}: {result}")
+        # Перечитываем accounts.json — состояние могло измениться через Web UI/команды.
+        self._load_accounts()
+
+        labels_to_connect = [label for label in self.accounts if label not in self.active_accounts]
+        if not labels_to_connect:
+            return
+
+        tasks = [self.connect_account(label) for label in labels_to_connect]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for label, result in zip(labels_to_connect, results):
+            if isinstance(result, Exception):
+                logger.error(f"Не удалось подключить {label}: {result}")
     
     async def disconnect_all(self) -> None:
         """Отключение всех аккаунтов."""

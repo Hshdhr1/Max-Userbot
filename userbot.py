@@ -7,19 +7,36 @@ import os
 import random
 import re
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
 import aiohttp
 from aiohttp import web
 from vkmax.client import MaxClient
-from vkmax.functions.messages import edit_message, send_message
+from vkmax.functions.messages import edit_message as _vkmax_edit_message
+from vkmax.functions.messages import send_message as _vkmax_send_message
+
+from core.catalog import (
+    CatalogEntry,
+    annotate_installed,
+    install_module,
+    load_catalog,
+    uninstall_module,
+)
+from core.log_buffer import log_buffer
+from core.security import is_dangerous, session_manager, verify_password
 
 LOG_FORMAT = "[%(asctime)s] [%(levelname)s] %(name)s: %(message)s"
 DATE_FORMAT = "%d.%m.%Y %H:%M:%S"
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, datefmt=DATE_FORMAT)
 logger = logging.getLogger("max-userbot")
+
+# Подключаем ring-buffer к корневому logger'у — теперь всё, что попадает в
+# logging.*, доступно через /api/logs (SSE) и /api/stats.
+log_buffer.setLevel(logging.INFO)
+log_buffer.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT))
+logging.getLogger().addHandler(log_buffer)
 
 SESSION_FILE = Path("max_session.txt")
 MODULES_DIR = Path("modules")
@@ -27,6 +44,33 @@ CONFIG_FILE = Path("userbot_config.json")
 ACCOUNTS_FILE = Path("accounts.json")
 DEFAULT_PREFIX = "."
 START_TS = int(time.time())
+
+
+# ------------------------------- stats / counters ----------------------------
+@dataclass
+class StatsCounters:
+    """Глобальные счётчики, отображаемые в Web UI / .stats команде."""
+    packets_in: int = 0
+    packets_out: int = 0
+    commands_handled: int = 0
+    last_command_ts: float = 0.0
+    last_error_ts: float = 0.0
+    last_error_msg: str = ""
+
+
+stats = StatsCounters()
+
+
+async def send_message(client: MaxClient, chat_id: int, text: str, *args: Any, **kwargs: Any) -> Any:
+    """Wrapper над vkmax send_message с инкрементом счётчика исходящих."""
+    stats.packets_out += 1
+    return await _vkmax_send_message(client, chat_id, text, *args, **kwargs)
+
+
+async def edit_message(client: MaxClient, chat_id: int, message_id: int, text: str, *args: Any, **kwargs: Any) -> Any:
+    """Wrapper над vkmax edit_message с инкрементом счётчика исходящих."""
+    stats.packets_out += 1
+    return await _vkmax_edit_message(client, chat_id, message_id, text, *args, **kwargs)
 
 
 # ----------------------------- formatting helpers -----------------------------
@@ -56,6 +100,7 @@ class BotModule:
     builtin: bool = True
     hidden: bool = False
     version: str | None = None
+    default_config: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -65,6 +110,10 @@ class UserbotConfig:
     random_reroute_guard: bool = True
     favorites_chat_id: int | None = None
     module_configs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Пароль для опасных действий: scrypt-хеш + соль (hex). Если оба пусты —
+    # бот при старте интерактивно спросит пароль и сохранит в конфиг.
+    dangerous_password_hash: str = ""
+    dangerous_password_salt: str = ""
 
 
 @dataclass
@@ -85,8 +134,21 @@ class ConfigStore:
     def load(self) -> None:
         if not self.path.exists():
             return
-        payload = json.loads(self.path.read_text(encoding="utf-8"))
-        self.data = UserbotConfig(**payload)
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Config file is unreadable, using defaults: %s", exc)
+            return
+        if not isinstance(payload, dict):
+            logger.warning("Config file is not a JSON object, using defaults")
+            return
+        # Drop unknown keys so an older/newer schema doesn't crash startup.
+        known = {f.name for f in fields(UserbotConfig)}
+        filtered = {k: v for k, v in payload.items() if k in known}
+        try:
+            self.data = UserbotConfig(**filtered)
+        except TypeError as exc:
+            logger.warning("Config file has invalid types, using defaults: %s", exc)
 
     def save(self) -> None:
         self.path.write_text(json.dumps(asdict(self.data), ensure_ascii=False, indent=2), encoding="utf-8")
@@ -99,8 +161,24 @@ class AccountStore:
     def load(self) -> list[AccountEntry]:
         if not self.path.exists():
             return []
-        rows = json.loads(self.path.read_text(encoding="utf-8"))
-        return [AccountEntry(**row) for row in rows]
+        try:
+            rows = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Accounts file is unreadable, treating as empty: %s", exc)
+            return []
+        if not isinstance(rows, list):
+            logger.warning("Accounts file is not a list, treating as empty")
+            return []
+        known = {f.name for f in fields(AccountEntry)}
+        result: list[AccountEntry] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                result.append(AccountEntry(**{k: v for k, v in row.items() if k in known}))
+            except TypeError as exc:
+                logger.warning("Skipping invalid account row: %s", exc)
+        return result
 
     def save(self, accounts: list[AccountEntry]) -> None:
         self.path.write_text(json.dumps([asdict(a) for a in accounts], ensure_ascii=False, indent=2), encoding="utf-8")
@@ -186,6 +264,8 @@ class ModuleRegistry:
     command_to_module: dict[str, str] = field(default_factory=dict)
     dynamic_commands: dict[str, Callable[[BotContext, int, int, str], Awaitable[str]]] = field(default_factory=dict)
     packet_watchers: list[PacketWatcher] = field(default_factory=list)
+    # Hikka-совместимые команды: имя -> (instance, async-метод)
+    class_commands: dict[str, tuple[Any, Callable[..., Awaitable[Any]]]] = field(default_factory=dict)
 
     def register_module(self, module: BotModule) -> None:
         key = module.name.lower()
@@ -267,7 +347,7 @@ class ModuleRegistry:
         return config.module_configs[key]
 
     def render_modules(self) -> str:
-        lines = [f"<b>Система модулей</b>", f"{len(self.available_modules)} модулей доступно, {len(self.hidden_modules)} скрыто:", ""]
+        lines = ["<b>Система модулей</b>", f"{len(self.available_modules)} модулей доступно, {len(self.hidden_modules)} скрыто:", ""]
         for module in self.available_modules:
             suffix = f" ({module.version})" if module.version else ""
             lines.append(f"🪐 <b>{module.name}{suffix}</b>")
@@ -336,152 +416,1388 @@ class WebUIManager:
 
     def _module_panel(self, module: BotModule) -> str:
         module_conf = self.config_store.data.module_configs.get(module.name.lower(), {})
-        default_conf = module.default_config or {}
-        
-        # Объединяем текущий конфиг с дефолтным для отображения
+        default_conf = getattr(module, "default_config", None) or {}
         display_conf = {**default_conf, **module_conf}
-        
-        options_html = ""
+
+        # ----- config form (MD3 filled text fields) ----------------------------
+        rows_html = ""
         for k, v in display_conf.items():
             val = module_conf.get(k, v)
-            options_html += f"""
-            <div class='cfg-row'>
-                <label>{html.escape(k)}</label>
-                <input name='value' value='{html.escape(str(val))}'>
-                <input type='hidden' name='module' value='{html.escape(module.name)}'>
-                <input type='hidden' name='key' value='{html.escape(k)}'>
-                <button type='submit'>Save</button>
-            </div>"""
-        
-        if not options_html:
-            options_html = "<div class='muted'>Нет конфигов (добавь через сообщения или API)</div>"
-        else:
-            options_html = f"<form method='post' action='/api/config'>{options_html}</form>"
+            rows_html += (
+                "<form class='cfg-row' method='post' action='/api/config'>"
+                "<div class='md3-textfield'>"
+                f"<input id='{html.escape(module.name)}-{html.escape(k)}' "
+                f"name='value' value='{html.escape(str(val))}' placeholder=' ' autocomplete='off'>"
+                f"<label for='{html.escape(module.name)}-{html.escape(k)}'>{html.escape(k)}</label>"
+                "</div>"
+                f"<input type='hidden' name='module' value='{html.escape(module.name)}'>"
+                f"<input type='hidden' name='key' value='{html.escape(k)}'>"
+                "<button type='submit' class='md3-btn md3-btn--tonal'>"
+                "<span class='material-symbols-outlined'>save</span>Save</button>"
+                "</form>"
+            )
+        cfg_html = (
+            rows_html
+            if rows_html
+            else "<p class='md3-empty'>Нет конфигов — добавь через <code>.cfg &lt;module&gt; &lt;key&gt; &lt;value&gt;</code> или API.</p>"
+        )
 
-        # Документация модуля
-        doc_html = ""
-        if module.description:
-            doc_html = f"<div class='module-doc'><p>{html.escape(module.description)}</p></div>"
-        
-        commands_doc = ""
+        # ----- description -----------------------------------------------------
+        doc_html = (
+            f"<p class='md3-card__support'>{html.escape(module.description)}</p>"
+            if module.description
+            else ""
+        )
+
+        # ----- commands chips --------------------------------------------------
+        commands_html = ""
         if module.commands:
-            commands_doc = "<div class='commands-list'><h4>Команды:</h4><ul>"
+            chips = ""
             for cmd in module.commands:
-                aliases = f" ({', '.join(cmd.aliases)})" if cmd.aliases else ""
-                commands_doc += f"<li><code>.{cmd.name}{aliases}</code> — {html.escape(cmd.description)}</li>"
-            commands_doc += "</ul></div>"
+                aliases = (
+                    f" <span class='md3-chip__sub'>· {html.escape(', '.join('.' + a for a in cmd.aliases))}</span>"
+                    if cmd.aliases
+                    else ""
+                )
+                chips += (
+                    "<li class='md3-chip' "
+                    f"title='{html.escape(cmd.description)}'>"
+                    f"<code>.{html.escape(cmd.name)}</code>{aliases}"
+                    "</li>"
+                )
+            commands_html = (
+                "<details class='md3-details'>"
+                f"<summary>Команды ({len(module.commands)})</summary>"
+                f"<ul class='md3-chips'>{chips}</ul>"
+                "</details>"
+            )
+
+        kind_badge = (
+            "<span class='md3-badge md3-badge--builtin'>builtin</span>"
+            if module.builtin
+            else "<span class='md3-badge md3-badge--external'>external</span>"
+        )
 
         return (
-            "<section class='module-card'>"
-            f"<h3>{html.escape(module.name)}</h3>"
+            "<article class='md3-card md3-card--filled'>"
+            "<header class='md3-card__header'>"
+            f"<h3 class='md3-card__title'>{html.escape(module.name)}</h3>"
+            f"{kind_badge}"
+            "</header>"
             f"{doc_html}"
-            f"{commands_doc}"
-            f"<h4>Конфигурация:</h4>"
-            f"{options_html}"
-            "</section>"
+            f"{commands_html}"
+            "<h4 class='md3-card__section'>Конфигурация</h4>"
+            f"<div class='md3-card__cfg'>{cfg_html}</div>"
+            "</article>"
         )
 
-    async def index(self, _: web.Request) -> web.Response:
-        modules_nav = "".join(
-            f"<li>{html.escape(m.name)} <span>{len(m.commands)}</span></li>" for m in self.registry.available_modules
+    @staticmethod
+    def _md3_css() -> str:
+        """Material Design 3 / Material You CSS (tokens + components)."""
+        return """
+:root {
+  --md-sys-typescale-display: 600 28px/36px Roboto, Arial, sans-serif;
+  --md-sys-typescale-title:   500 16px/24px Roboto, Arial, sans-serif;
+  --md-sys-typescale-body:    400 14px/20px Roboto, Arial, sans-serif;
+  --md-sys-typescale-label:   500 12px/16px Roboto, Arial, sans-serif;
+  --md-sys-state-hover: rgba(103, 80, 164, 0.08);
+  --md-sys-state-press: rgba(103, 80, 164, 0.16);
+  --md-sys-radius-xs: 4px;
+  --md-sys-radius-sm: 8px;
+  --md-sys-radius-md: 12px;
+  --md-sys-radius-lg: 16px;
+  --md-sys-radius-xl: 28px;
+  --md-elev-1: 0 1px 3px rgba(0,0,0,.30), 0 1px 2px rgba(0,0,0,.15);
+  --md-elev-2: 0 2px 6px rgba(0,0,0,.30), 0 1px 2px rgba(0,0,0,.15);
+}
+:root[data-theme="light"] {
+  --md-sys-color-primary: #6750A4;
+  --md-sys-color-on-primary: #FFFFFF;
+  --md-sys-color-primary-container: #EADDFF;
+  --md-sys-color-on-primary-container: #21005D;
+  --md-sys-color-secondary-container: #E8DEF8;
+  --md-sys-color-on-secondary-container: #1D192B;
+  --md-sys-color-tertiary-container: #FFD8E4;
+  --md-sys-color-on-tertiary-container: #31111D;
+  --md-sys-color-background: #FEF7FF;
+  --md-sys-color-on-background: #1D1B20;
+  --md-sys-color-surface: #FEF7FF;
+  --md-sys-color-surface-container: #F3EDF7;
+  --md-sys-color-surface-container-high: #ECE6F0;
+  --md-sys-color-surface-container-highest: #E6E0E9;
+  --md-sys-color-on-surface: #1D1B20;
+  --md-sys-color-on-surface-variant: #49454F;
+  --md-sys-color-outline: #79747E;
+  --md-sys-color-outline-variant: #CAC4D0;
+  --md-sys-color-error: #B3261E;
+  --md-sys-color-success: #146C2E;
+}
+:root[data-theme="dark"] {
+  --md-sys-color-primary: #D0BCFF;
+  --md-sys-color-on-primary: #381E72;
+  --md-sys-color-primary-container: #4F378B;
+  --md-sys-color-on-primary-container: #EADDFF;
+  --md-sys-color-secondary-container: #4A4458;
+  --md-sys-color-on-secondary-container: #E8DEF8;
+  --md-sys-color-tertiary-container: #633B48;
+  --md-sys-color-on-tertiary-container: #FFD8E4;
+  --md-sys-color-background: #141218;
+  --md-sys-color-on-background: #E6E1E5;
+  --md-sys-color-surface: #141218;
+  --md-sys-color-surface-container: #1D1B20;
+  --md-sys-color-surface-container-high: #2B2930;
+  --md-sys-color-surface-container-highest: #36343B;
+  --md-sys-color-on-surface: #E6E1E5;
+  --md-sys-color-on-surface-variant: #CAC4D0;
+  --md-sys-color-outline: #938F99;
+  --md-sys-color-outline-variant: #49454F;
+  --md-sys-color-error: #F2B8B5;
+  --md-sys-color-success: #74D690;
+}
+
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  padding: 0;
+  font: var(--md-sys-typescale-body);
+  background: var(--md-sys-color-background);
+  color: var(--md-sys-color-on-background);
+  min-height: 100vh;
+  transition: background-color 200ms ease, color 200ms ease;
+}
+code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospace; }
+
+/* ---- top app bar ------------------------------------------------------- */
+.md3-app-bar {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; align-items: center; gap: 16px;
+  padding: 12px 24px;
+  background: var(--md-sys-color-surface-container);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  backdrop-filter: saturate(1.2);
+}
+.md3-app-bar__lead { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.md3-app-bar__icon {
+  font-size: 28px;
+  color: var(--md-sys-color-primary);
+  background: var(--md-sys-color-primary-container);
+  border-radius: 999px; padding: 8px;
+}
+.md3-app-bar__title { margin: 0; font: var(--md-sys-typescale-display); }
+.md3-app-bar__subtitle {
+  margin: 0; color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-typescale-label);
+}
+.md3-app-bar__stats { display: flex; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+.md3-stat {
+  display: inline-flex; flex-direction: column; align-items: flex-end;
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+  border-radius: var(--md-sys-radius-md); padding: 6px 12px; min-width: 80px;
+}
+.md3-stat b { font: var(--md-sys-typescale-title); }
+.md3-stat small { font: var(--md-sys-typescale-label); opacity: .8; }
+.md3-app-bar__actions { display: flex; gap: 4px; }
+.md3-iconbtn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 40px; height: 40px; border-radius: 999px;
+  background: transparent; border: none; cursor: pointer;
+  color: var(--md-sys-color-on-surface-variant);
+  text-decoration: none;
+  transition: background-color 120ms ease;
+}
+.md3-iconbtn:hover { background: var(--md-sys-state-hover); }
+.md3-iconbtn:active { background: var(--md-sys-state-press); }
+
+/* ---- shell layout ------------------------------------------------------ */
+.md3-shell {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: 24px; padding: 24px;
+  max-width: 1480px; margin: 0 auto;
+}
+@media (max-width: 900px) {
+  .md3-shell { grid-template-columns: 1fr; }
+  .md3-rail { position: relative !important; max-height: none !important; }
+}
+
+/* ---- navigation rail --------------------------------------------------- */
+.md3-rail {
+  position: sticky; top: 88px;
+  align-self: start;
+  background: var(--md-sys-color-surface-container);
+  border-radius: var(--md-sys-radius-xl);
+  padding: 16px;
+  max-height: calc(100vh - 110px);
+  display: flex; flex-direction: column; gap: 12px;
+  overflow: hidden;
+}
+.md3-rail__list {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 4px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+.md3-rail__list::-webkit-scrollbar { width: 6px; }
+.md3-rail__list::-webkit-scrollbar-thumb {
+  background: var(--md-sys-color-outline-variant); border-radius: 3px;
+}
+.md3-rail__item {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px; border-radius: 999px;
+  cursor: pointer; user-select: none;
+  color: var(--md-sys-color-on-surface);
+  font: var(--md-sys-typescale-label); font-size: 14px;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+.md3-rail__item:hover { background: var(--md-sys-state-hover); }
+.md3-rail__item:active { background: var(--md-sys-state-press); }
+.md3-rail__count {
+  background: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+  border-radius: 999px; padding: 2px 10px; font-size: 12px;
+}
+
+/* ---- text fields (filled MD3) ----------------------------------------- */
+.md3-textfield {
+  position: relative; flex: 1;
+  background: var(--md-sys-color-surface-container-highest);
+  border-radius: var(--md-sys-radius-xs) var(--md-sys-radius-xs) 0 0;
+  border-bottom: 1px solid var(--md-sys-color-outline);
+  transition: border-color 120ms ease;
+  min-width: 160px;
+}
+.md3-textfield:focus-within { border-bottom-color: var(--md-sys-color-primary); }
+.md3-textfield input {
+  width: 100%; padding: 22px 12px 8px;
+  background: transparent; border: none; outline: none;
+  color: var(--md-sys-color-on-surface);
+  font: var(--md-sys-typescale-body); font-size: 14px;
+}
+.md3-textfield label {
+  position: absolute; left: 12px; top: 16px;
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-typescale-body); pointer-events: none;
+  transition: top 120ms ease, font-size 120ms ease, color 120ms ease;
+}
+.md3-textfield input:focus + label,
+.md3-textfield input:not(:placeholder-shown) + label {
+  top: 4px; font-size: 11px; color: var(--md-sys-color-primary);
+}
+
+/* ---- buttons ---------------------------------------------------------- */
+.md3-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  border: none; cursor: pointer;
+  font: var(--md-sys-typescale-label); font-size: 14px;
+  padding: 10px 24px; border-radius: 999px;
+  transition: background-color 120ms ease, box-shadow 120ms ease;
+  white-space: nowrap;
+}
+.md3-btn .material-symbols-outlined { font-size: 18px; }
+.md3-btn--filled {
+  background: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
+}
+.md3-btn--filled:hover { box-shadow: var(--md-elev-1); filter: brightness(1.05); }
+.md3-btn--tonal {
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+  padding: 8px 16px;
+}
+.md3-btn--tonal:hover { filter: brightness(1.05); }
+.md3-btn--outlined {
+  background: transparent;
+  color: var(--md-sys-color-primary);
+  border: 1px solid var(--md-sys-color-outline);
+  padding: 8px 16px;
+}
+.md3-btn--outlined:hover { background: var(--md-sys-state-hover); }
+
+/* ---- sections / cards -------------------------------------------------- */
+.md3-section { display: flex; flex-direction: column; gap: 12px; margin-bottom: 32px; }
+.md3-section__header h2 {
+  margin: 0; font: var(--md-sys-typescale-display); font-size: 22px;
+  display: flex; align-items: center; gap: 10px;
+  color: var(--md-sys-color-on-surface);
+}
+.md3-section__header .material-symbols-outlined {
+  font-size: 22px; color: var(--md-sys-color-primary);
+}
+.md3-card {
+  background: var(--md-sys-color-surface-container);
+  border-radius: var(--md-sys-radius-lg);
+  padding: 20px; transition: box-shadow 200ms ease, transform 200ms ease;
+}
+.md3-card--elevated { box-shadow: var(--md-elev-1); }
+.md3-card--elevated:hover { box-shadow: var(--md-elev-2); }
+.md3-card--filled { background: var(--md-sys-color-surface-container-high); }
+.md3-card--filled:hover { transform: translateY(-1px); box-shadow: var(--md-elev-1); }
+.md3-card-grid {
+  display: grid; gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+}
+.md3-card__header {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  margin-bottom: 8px;
+}
+.md3-card__title { margin: 0; font: var(--md-sys-typescale-title); font-size: 18px; }
+.md3-card__support { color: var(--md-sys-color-on-surface-variant); margin: 4px 0 16px; }
+.md3-card__section {
+  margin: 16px 0 8px;
+  font: var(--md-sys-typescale-label);
+  text-transform: uppercase; letter-spacing: .5px;
+  color: var(--md-sys-color-on-surface-variant);
+}
+.md3-card__cfg { display: flex; flex-direction: column; gap: 12px; }
+.md3-empty {
+  margin: 8px 0; padding: 12px;
+  background: var(--md-sys-color-surface-container-highest);
+  border-radius: var(--md-sys-radius-sm);
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-typescale-body); font-style: italic;
+}
+.md3-empty code {
+  background: var(--md-sys-color-surface-container);
+  padding: 2px 6px; border-radius: 4px; color: var(--md-sys-color-primary);
+}
+
+/* ---- chips / commands -------------------------------------------------- */
+.md3-details summary {
+  cursor: pointer; padding: 6px 0;
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-typescale-label); font-size: 13px;
+}
+.md3-chips {
+  list-style: none; margin: 8px 0 0; padding: 0;
+  display: flex; flex-wrap: wrap; gap: 6px;
+}
+.md3-chip {
+  background: var(--md-sys-color-surface-container-highest);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: 8px; padding: 4px 10px;
+  font-size: 12px; color: var(--md-sys-color-on-surface);
+}
+.md3-chip code { color: var(--md-sys-color-primary); }
+.md3-chip__sub { color: var(--md-sys-color-on-surface-variant); }
+
+/* ---- forms ------------------------------------------------------------- */
+.md3-form { display: flex; flex-direction: column; gap: 12px; margin-bottom: 16px; }
+.md3-form--inline {
+  flex-direction: row; align-items: stretch; flex-wrap: wrap;
+}
+.cfg-row {
+  display: flex; align-items: stretch; gap: 8px; flex-wrap: wrap;
+}
+.cfg-row .md3-textfield { min-width: 220px; }
+
+/* ---- list rows --------------------------------------------------------- */
+.md3-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.md3-list__row {
+  display: flex; align-items: center; gap: 14px;
+  padding: 12px 8px; border-radius: var(--md-sys-radius-md);
+  transition: background-color 120ms ease;
+}
+.md3-list__row:hover { background: var(--md-sys-state-hover); }
+.md3-list__avatar {
+  font-size: 32px; color: var(--md-sys-color-primary);
+}
+.md3-list__primary { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.md3-list__title { font: var(--md-sys-typescale-title); font-size: 15px; }
+.md3-list__support { color: var(--md-sys-color-on-surface-variant); font-size: 13px; }
+.md3-list__empty { padding: 16px; text-align: center; }
+
+/* ---- badge ------------------------------------------------------------- */
+.md3-badge {
+  display: inline-block; padding: 2px 10px; border-radius: 999px;
+  font: var(--md-sys-typescale-label); font-size: 11px; letter-spacing: .3px;
+}
+.md3-badge--builtin {
+  background: color-mix(in srgb, var(--md-sys-color-success) 18%, transparent);
+  color: var(--md-sys-color-success);
+}
+.md3-badge--external {
+  background: var(--md-sys-color-tertiary-container);
+  color: var(--md-sys-color-on-tertiary-container);
+}
+
+/* ---- snackbar ---------------------------------------------------------- */
+.md3-snackbar {
+  position: fixed; bottom: -80px; left: 50%; transform: translateX(-50%);
+  background: var(--md-sys-color-on-surface);
+  color: var(--md-sys-color-surface);
+  padding: 14px 24px; border-radius: var(--md-sys-radius-xs);
+  font: var(--md-sys-typescale-body); font-size: 14px;
+  box-shadow: var(--md-elev-2);
+  transition: bottom 220ms ease;
+  pointer-events: none;
+  z-index: 100;
+}
+.md3-snackbar--open { bottom: 32px; }
+
+/* ---- stats tiles ------------------------------------------------------- */
+.md3-section__hint {
+  margin-left: auto;
+  font: var(--md-sys-typescale-label);
+  color: var(--md-sys-color-on-surface-variant);
+}
+.md3-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+.md3-tile {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 16px;
+  background: var(--md-sys-color-surface-container-high);
+  border-radius: var(--md-sys-radius-md);
+  transition: transform 200ms ease, box-shadow 200ms ease;
+}
+.md3-tile:hover { transform: translateY(-1px); box-shadow: var(--md-elev-1); }
+.md3-tile .material-symbols-outlined {
+  background: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+  border-radius: 999px; padding: 8px; font-size: 22px;
+}
+.md3-tile b { display: block; font: var(--md-sys-typescale-display); font-size: 22px; line-height: 1.1; }
+.md3-tile small { color: var(--md-sys-color-on-surface-variant); font-size: 12px; }
+.md3-stat-error {
+  display: flex; align-items: center; gap: 8px;
+  margin: 12px 0 0; padding: 10px 12px;
+  background: color-mix(in srgb, var(--md-sys-color-error) 15%, transparent);
+  color: var(--md-sys-color-error);
+  border-radius: var(--md-sys-radius-md);
+  font-size: 13px;
+}
+.md3-stat-error[hidden] { display: none; }
+
+/* ---- catalog cards ---------------------------------------------------- */
+.md3-catalog__card {
+  display: flex; flex-direction: column; gap: 12px;
+  padding: 20px;
+  background: var(--md-sys-color-surface-container-high);
+  border-radius: 16px;
+  box-shadow: var(--md-elev-0);
+  transition: transform 120ms ease, box-shadow 120ms ease;
+  border: 1px solid var(--md-sys-color-outline-variant);
+}
+.md3-catalog__card:hover { transform: translateY(-1px); box-shadow: var(--md-elev-1); }
+.md3-catalog__head {
+  display: flex; justify-content: space-between; align-items: flex-start; gap: 12px;
+}
+.md3-catalog__title {
+  font: var(--md-sys-typescale-title); margin: 0; color: var(--md-sys-color-on-surface);
+}
+.md3-catalog__meta {
+  font: var(--md-sys-typescale-label);
+  color: var(--md-sys-color-on-surface-variant);
+}
+.md3-catalog__desc {
+  margin: 0; color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-typescale-body);
+}
+.md3-catalog__tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.md3-catalog__tag {
+  padding: 2px 10px; border-radius: 999px;
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+  font: var(--md-sys-typescale-label); font-size: 11px;
+}
+.md3-catalog__actions { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+.md3-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 4px 10px; border-radius: 999px;
+  font: var(--md-sys-typescale-label); font-size: 11px;
+}
+.md3-badge--installed {
+  background: var(--md-sys-color-tertiary-container);
+  color: var(--md-sys-color-on-tertiary-container);
+}
+.md3-badge--available {
+  background: var(--md-sys-color-surface-container);
+  color: var(--md-sys-color-on-surface-variant);
+}
+.md3-badge--threat-critical { background: #FFEDEA; color: #B3261E; }
+.md3-badge--threat-high     { background: #FFF1D6; color: #7A4F00; }
+.md3-badge--threat-medium   { background: #FFF7E0; color: #6B5300; }
+.md3-badge--threat-ok       { background: var(--md-sys-color-tertiary-container); color: var(--md-sys-color-on-tertiary-container); }
+@media (prefers-color-scheme: dark) {
+  .md3-badge--threat-critical { background: rgba(255, 100, 100, 0.18); color: #FFB4AB; }
+  .md3-badge--threat-high     { background: rgba(255, 200, 100, 0.18); color: #FFD78A; }
+  .md3-badge--threat-medium   { background: rgba(255, 220, 130, 0.14); color: #FFE8A8; }
+}
+
+/* ---- threats panel ---------------------------------------------------- */
+.md3-threats__summary {
+  display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px;
+}
+.md3-threat-card {
+  background: var(--md-sys-color-surface-container);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: 16px;
+  padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 8px;
+  margin-bottom: 10px;
+}
+.md3-threat-card--critical { border-color: #B3261E; }
+.md3-threat-card--high     { border-color: #B58A3F; }
+.md3-threat-card--medium   { border-color: var(--md-sys-color-outline); }
+.md3-threat-card__head {
+  display: flex; gap: 12px; align-items: center; justify-content: space-between;
+}
+.md3-threat-card__title { font-weight: 600; }
+.md3-threat-card__file {
+  font-family: 'Roboto Mono', monospace;
+  font-size: 11px; color: var(--md-sys-color-on-surface-variant);
+}
+.md3-threat-list {
+  list-style: none; padding: 0; margin: 0;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.md3-threat-list li {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 8px 10px; border-radius: 10px;
+  background: var(--md-sys-color-surface-container-highest);
+}
+.md3-threat-list .label { font-weight: 500; }
+.md3-threat-list .meta {
+  font-size: 11px; color: var(--md-sys-color-on-surface-variant);
+}
+.md3-threat-list .snippet {
+  font-family: 'Roboto Mono', monospace; font-size: 12px;
+  color: var(--md-sys-color-on-surface);
+  padding: 6px 8px; border-radius: 6px;
+  background: var(--md-sys-color-surface);
+  white-space: pre-wrap; word-break: break-all;
+}
+.md3-threat-card__actions { display: flex; gap: 8px; }
+
+/* ---- unlock modal ----------------------------------------------------- */
+.md3-modal[hidden] { display: none; }
+.md3-modal {
+  position: fixed; inset: 0; z-index: 1000;
+  display: flex; align-items: center; justify-content: center;
+}
+.md3-modal__scrim {
+  position: absolute; inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(2px);
+  cursor: pointer;
+}
+.md3-modal__sheet {
+  position: relative;
+  background: var(--md-sys-color-surface-container-highest);
+  color: var(--md-sys-color-on-surface);
+  border-radius: 28px;
+  padding: 24px;
+  width: min(92vw, 420px);
+  display: flex; flex-direction: column; gap: 16px;
+  box-shadow: var(--md-elev-3, 0 8px 24px rgba(0,0,0,0.2));
+}
+.md3-modal__sheet h3 {
+  margin: 0; font: var(--md-sys-typescale-title);
+}
+.md3-modal__desc {
+  margin: 0; font: var(--md-sys-typescale-body);
+  color: var(--md-sys-color-on-surface-variant);
+}
+.md3-modal__actions {
+  display: flex; justify-content: flex-end; gap: 8px;
+}
+.md3-modal__error {
+  background: var(--md-sys-color-error-container);
+  color: var(--md-sys-color-on-error-container);
+  padding: 8px 12px; border-radius: 8px;
+  font: var(--md-sys-typescale-label);
+}
+.md3-modal__error[hidden] { display: none; }
+
+.md3-iconbtn .material-symbols-outlined.lock-unlocked {
+  color: var(--md-sys-color-tertiary);
+}
+
+/* ---- logs viewer ------------------------------------------------------- */
+.md3-logs__controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.md3-logs__card { padding: 0 !important; overflow: hidden; }
+.md3-log-view {
+  margin: 0;
+  height: 360px; overflow: auto;
+  padding: 14px 18px;
+  background: var(--md-sys-color-surface-container-highest);
+  font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospace;
+  font-size: 12.5px; line-height: 1.55;
+  color: var(--md-sys-color-on-surface);
+  white-space: pre-wrap; word-break: break-word;
+  scrollbar-width: thin;
+}
+.md3-log-view::-webkit-scrollbar { width: 8px; }
+.md3-log-view::-webkit-scrollbar-thumb { background: var(--md-sys-color-outline-variant); border-radius: 4px; }
+.md3-log-view > span { display: block; }
+.md3-log-ts { color: var(--md-sys-color-on-surface-variant); }
+.md3-log-lvl {
+  display: inline-block; min-width: 64px;
+  padding: 0 6px; margin-right: 4px;
+  border-radius: 4px;
+  font-weight: 700; font-size: 11px;
+  background: var(--md-sys-color-surface-container);
+}
+.md3-log-name { color: var(--md-sys-color-primary); margin-right: 4px; }
+.md3-log-debug   .md3-log-lvl { color: var(--md-sys-color-on-surface-variant); }
+.md3-log-info    .md3-log-lvl { color: var(--md-sys-color-primary); }
+.md3-log-warning .md3-log-lvl { color: #FFB800; }
+.md3-log-error,
+.md3-log-critical { color: var(--md-sys-color-error); }
+.md3-log-error    .md3-log-lvl,
+.md3-log-critical .md3-log-lvl {
+  background: color-mix(in srgb, var(--md-sys-color-error) 25%, transparent);
+  color: var(--md-sys-color-error);
+}
+.md3-select {
+  padding: 8px 12px;
+  background: var(--md-sys-color-surface-container-highest);
+  color: var(--md-sys-color-on-surface);
+  border: 1px solid var(--md-sys-color-outline);
+  border-radius: var(--md-sys-radius-sm);
+  font: var(--md-sys-typescale-body); font-size: 13px;
+  cursor: pointer;
+}
+.md3-select:focus { outline: 2px solid var(--md-sys-color-primary); outline-offset: 2px; }
+"""
+
+    async def index(self, request: web.Request) -> web.Response:
+        modules = self.registry.available_modules
+        cards = "".join(self._module_panel(m) for m in modules)
+
+        rail_items = "".join(
+            f"<li class='md3-rail__item' data-module='{html.escape(m.name)}'>"
+            f"<span class='md3-rail__name'>{html.escape(m.name)}</span>"
+            f"<span class='md3-rail__count'>{len(m.commands)}</span>"
+            "</li>"
+            for m in modules
         )
-        cards = "".join(self._module_panel(m) for m in self.registry.available_modules)
 
         accounts = self.account_store.load()
-        accounts_html = "".join(
-            f"<div class='account'><b>{html.escape(a.label)}</b><small>{html.escape(a.phone)}</small><em>{html.escape(a.state)}</em></div>"
-            for a in accounts
-        ) or "<div class='account muted'>Нет подключённых аккаунтов</div>"
+        if accounts:
+            accounts_html = "".join(
+                "<li class='md3-list__row'>"
+                "<span class='md3-list__avatar material-symbols-outlined'>account_circle</span>"
+                "<div class='md3-list__primary'>"
+                f"<div class='md3-list__title'>{html.escape(a.label)}</div>"
+                f"<div class='md3-list__support'>{html.escape(a.phone)}</div>"
+                "</div>"
+                f"<span class='md3-badge md3-badge--{ 'builtin' if a.state == 'authorized' else 'external'}'>"
+                f"{html.escape(a.state)}</span>"
+                "</li>"
+                for a in accounts
+            )
+        else:
+            accounts_html = "<li class='md3-empty md3-list__empty'>Нет подключённых аккаунтов.</li>"
 
         uptime = int(time.time()) - START_TS
-        html_page = f"""
-<!doctype html>
+        saved = request.query.get("saved")
+        snackbar_text = ""
+        if saved == "config":
+            snackbar_text = "Конфиг сохранён"
+        elif saved == "account":
+            snackbar_text = "Аккаунт добавлен"
+
+        html_page = f"""<!doctype html>
 <html lang='ru'>
 <head>
 <meta charset='utf-8'>
-<title>Max Userbot Web UI</title>
-<style>
-:root {{ --bg:#0d0f17; --card:#141826; --line:#252d42; --text:#eef2ff; --muted:#8d97b5; --accent:#16a34a; }}
-* {{ box-sizing:border-box; }}
-body {{ margin:0; background:var(--bg); color:var(--text); font-family:Inter,Arial,sans-serif; }}
-.layout {{ display:grid; grid-template-columns:280px 1fr; min-height:100vh; }}
-.sidebar {{ border-right:1px solid var(--line); padding:18px; background:#111521; }}
-.brand {{ font-size:26px; font-weight:800; margin-bottom:14px; }}
-.search {{ width:100%; padding:10px 12px; background:#0f1320; border:1px solid var(--line); border-radius:12px; color:var(--text); }}
-.sidebar ul {{ list-style:none; padding:0; margin:14px 0 0; }}
-.sidebar li {{ display:flex; justify-content:space-between; padding:10px 8px; border-radius:10px; }}
-.sidebar li:hover {{ background:#171d2d; }}
-.main {{ padding:22px; }}
-.stats {{ display:grid; grid-template-columns:repeat(3,minmax(180px,1fr)); gap:12px; margin-bottom:14px; }}
-.stat {{ background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; }}
-.stat h2 {{ margin:0; font-size:30px; color:#20d38a; }}
-.accounts, .modules {{ background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; margin-top:12px; }}
-.module-grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); gap:14px; }}
-.module-card {{ background:#101523; border:1px solid var(--line); border-radius:12px; padding:16px; }}
-.module-card h3 {{ margin:0 0 8px; font-size:18px; color:#fff; }}
-.module-card h4 {{ margin:14px 0 8px; font-size:14px; color:#8d97b5; text-transform:uppercase; letter-spacing:0.5px; }}
-.module-doc {{ background:#0f1320; border-radius:8px; padding:10px; margin:8px 0; }}
-.module-doc p {{ margin:0; color:#c7d2fe; line-height:1.5; }}
-.commands-list {{ margin:8px 0; }}
-.commands-list ul {{ list-style:none; padding:0; margin:0; }}
-.commands-list li {{ padding:6px 0; border-bottom:1px solid #1f2937; font-size:13px; }}
-.commands-list li:last-child {{ border-bottom:none; }}
-.commands-list code {{ background:#1f2937; padding:2px 6px; border-radius:4px; color:#60a5fa; font-family:'Consolas','Monaco',monospace; font-size:12px; }}
-.cfg-row {{ display:flex; gap:8px; margin-top:8px; align-items:center; }}
-.cfg-row label {{ min-width:120px; font-size:13px; color:#a5b4fc; }}
-.cfg-row input {{ flex:1; padding:8px; background:#0f1320; border:1px solid var(--line); color:var(--text); border-radius:8px; font-size:13px; }}
-.cfg-row button {{ background:#315efb; color:white; border:none; border-radius:8px; padding:8px 12px; cursor:pointer; font-size:13px; white-space:nowrap; }}
-.cfg-row button:hover {{ background:#2563eb; }}
-.muted {{ color:var(--muted); font-style:italic; }}
-.account {{ display:flex; gap:10px; align-items:center; border:1px solid var(--line); padding:8px 10px; border-radius:10px; margin-top:8px; }}
-.account em {{ margin-left:auto; color:#6b7280; }}
-.add-account {{ display:grid; grid-template-columns:1fr 1fr auto; gap:8px; }}
-.add-account input {{ padding:8px; border-radius:8px; border:1px solid var(--line); background:#0f1320; color:var(--text); }}
-</style>
+<meta name='viewport' content='width=device-width, initial-scale=1'>
+<meta name='theme-color' content='#1d192b' media='(prefers-color-scheme: dark)'>
+<meta name='theme-color' content='#fef7ff' media='(prefers-color-scheme: light)'>
+<title>Max Userbot · Console</title>
+<link rel='preconnect' href='https://fonts.googleapis.com'>
+<link rel='preconnect' href='https://fonts.gstatic.com' crossorigin>
+<link rel='stylesheet'
+      href='https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Roboto+Mono&display=swap'>
+<link rel='stylesheet'
+      href='https://fonts.googleapis.com/icon?family=Material+Symbols+Outlined'>
+<style>{self._md3_css()}</style>
 </head>
 <body>
-<div class='layout'>
-  <aside class='sidebar'>
-    <div class='brand'>Maxli</div>
-    <input class='search' placeholder='Поиск модулей...'>
-    <ul>{modules_nav}</ul>
-  </aside>
-  <main class='main'>
-    <section class='stats'>
-      <div class='stat'><div>Активные клиенты</div><h2>{max(len(accounts), 1)}</h2></div>
-      <div class='stat'><div>Загруженные модули</div><h2>{len(self.registry.available_modules)}</h2></div>
-      <div class='stat'><div>Uptime</div><h2>{uptime}s</h2></div>
+<header class='md3-app-bar'>
+  <div class='md3-app-bar__lead'>
+    <span class='material-symbols-outlined md3-app-bar__icon'>terminal</span>
+    <div>
+      <h1 class='md3-app-bar__title'>Max&nbsp;Userbot</h1>
+      <p class='md3-app-bar__subtitle'>Console · Material You</p>
+    </div>
+  </div>
+  <div class='md3-app-bar__stats'>
+    <span class='md3-stat'><b>{len(modules)}</b><small>модулей</small></span>
+    <span class='md3-stat'><b>{len(accounts)}</b><small>аккаунтов</small></span>
+    <span class='md3-stat'><b>{uptime}s</b><small>uptime</small></span>
+  </div>
+  <div class='md3-app-bar__actions'>
+    <button id='md3-lock-toggle' class='md3-iconbtn' aria-label='Опасные действия' title='Опасные действия'>
+      <span class='material-symbols-outlined' id='md3-lock-icon'>lock</span>
+    </button>
+    <button id='md3-theme-toggle' class='md3-iconbtn' aria-label='Переключить тему'>
+      <span class='material-symbols-outlined'>dark_mode</span>
+    </button>
+    <a class='md3-iconbtn' href='/health' target='_blank' aria-label='Health check'>
+      <span class='material-symbols-outlined'>monitor_heart</span>
+    </a>
+  </div>
+</header>
+
+<div class='md3-modal' id='md3-unlock-modal' hidden>
+  <div class='md3-modal__scrim' data-close='1'></div>
+  <div class='md3-modal__sheet' role='dialog' aria-modal='true' aria-labelledby='md3-unlock-title'>
+    <h3 id='md3-unlock-title'>Опасные действия</h3>
+    <p id='md3-unlock-desc' class='md3-modal__desc'></p>
+    <div class='md3-textfield'>
+      <input id='md3-unlock-pass' type='password' placeholder=' ' autocomplete='current-password'>
+      <label for='md3-unlock-pass'>Пароль</label>
+    </div>
+    <div class='md3-modal__error' id='md3-unlock-error' hidden></div>
+    <div class='md3-modal__actions'>
+      <button class='md3-btn md3-btn--text' data-close='1'>Отмена</button>
+      <button class='md3-btn md3-btn--filled' id='md3-unlock-submit'>Открыть сессию</button>
+    </div>
+  </div>
+</div>
+
+<div class='md3-shell'>
+  <nav class='md3-rail' aria-label='Модули'>
+    <div class='md3-rail__search md3-textfield'>
+      <input id='md3-search' placeholder=' ' autocomplete='off'>
+      <label for='md3-search'>Поиск модулей</label>
+    </div>
+    <ul class='md3-rail__list'>{rail_items}</ul>
+  </nav>
+
+  <main class='md3-main'>
+    <section class='md3-section' id='stats'>
+      <header class='md3-section__header'>
+        <h2><span class='material-symbols-outlined'>monitoring</span>Статистика</h2>
+        <span class='md3-section__hint' id='md3-stats-hint'>обновляется каждые 2с</span>
+      </header>
+      <article class='md3-card md3-card--elevated'>
+        <div class='md3-stat-grid' id='md3-stat-grid'>
+          <div class='md3-tile' data-key='uptime_seconds'>
+            <span class='material-symbols-outlined'>schedule</span>
+            <div><b id='md3-stat-uptime'>—</b><small>uptime</small></div>
+          </div>
+          <div class='md3-tile' data-key='modules'>
+            <span class='material-symbols-outlined'>extension</span>
+            <div><b id='md3-stat-modules'>—</b><small>модулей</small></div>
+          </div>
+          <div class='md3-tile' data-key='commands'>
+            <span class='material-symbols-outlined'>terminal</span>
+            <div><b id='md3-stat-commands'>—</b><small>команд</small></div>
+          </div>
+          <div class='md3-tile' data-key='watchers'>
+            <span class='material-symbols-outlined'>sensors</span>
+            <div><b id='md3-stat-watchers'>—</b><small>watcher'ов</small></div>
+          </div>
+          <div class='md3-tile' data-key='accounts'>
+            <span class='material-symbols-outlined'>group</span>
+            <div><b id='md3-stat-accounts'>—</b><small>аккаунтов</small></div>
+          </div>
+          <div class='md3-tile' data-key='packets_in'>
+            <span class='material-symbols-outlined'>arrow_downward</span>
+            <div><b id='md3-stat-pktin'>—</b><small>входящих</small></div>
+          </div>
+          <div class='md3-tile' data-key='packets_out'>
+            <span class='material-symbols-outlined'>arrow_upward</span>
+            <div><b id='md3-stat-pktout'>—</b><small>исходящих</small></div>
+          </div>
+          <div class='md3-tile' data-key='commands_handled'>
+            <span class='material-symbols-outlined'>check_circle</span>
+            <div><b id='md3-stat-cmdhandled'>—</b><small>обработано</small></div>
+          </div>
+        </div>
+        <p class='md3-stat-error' id='md3-stat-error' hidden>
+          <span class='material-symbols-outlined'>error</span>
+          <span id='md3-stat-error-msg'></span>
+        </p>
+      </article>
     </section>
 
-    <section class='accounts'>
-      <h2>Подключенные аккаунты</h2>
-      <form class='add-account' method='post' action='/api/accounts'>
-        <input name='label' placeholder='label (main)'>
-        <input name='phone' placeholder='+79990000000'>
-        <button type='submit'>Добавить</button>
-      </form>
-      {accounts_html}
+    <section class='md3-section' id='logs'>
+      <header class='md3-section__header'>
+        <h2><span class='material-symbols-outlined'>article</span>Логи</h2>
+        <div class='md3-logs__controls'>
+          <select id='md3-log-level' class='md3-select'>
+            <option value=''>Все уровни</option>
+            <option value='DEBUG'>DEBUG</option>
+            <option value='INFO' selected>INFO+</option>
+            <option value='WARNING'>WARNING+</option>
+            <option value='ERROR'>ERROR</option>
+          </select>
+          <button id='md3-log-pause' class='md3-btn md3-btn--tonal' type='button'>
+            <span class='material-symbols-outlined'>pause</span><span>Пауза</span>
+          </button>
+          <button id='md3-log-clear' class='md3-btn md3-btn--outlined' type='button'>
+            <span class='material-symbols-outlined'>delete_sweep</span>Очистить
+          </button>
+        </div>
+      </header>
+      <article class='md3-card md3-card--elevated md3-logs__card'>
+        <pre id='md3-log-view' class='md3-log-view'>connecting…</pre>
+      </article>
     </section>
 
-    <section class='modules'>
-      <h2>Модули / конфиги</h2>
-      <div class='module-grid'>{cards}</div>
+    <section class='md3-section' id='threats'>
+      <header class='md3-section__header'>
+        <h2><span class='material-symbols-outlined'>shield</span>Безопасность модулей</h2>
+        <span class='md3-section__hint' id='md3-threats-hint'>сканируем…</span>
+      </header>
+      <div id='md3-threats-grid'>
+        <div class='md3-empty'>Сканер запускается…</div>
+      </div>
+    </section>
+
+    <section class='md3-section' id='catalog'>
+      <header class='md3-section__header'>
+        <h2><span class='material-symbols-outlined'>storefront</span>Каталог модулей</h2>
+        <span class='md3-section__hint' id='md3-catalog-hint'>загрузка…</span>
+      </header>
+      <div class='md3-card-grid' id='md3-catalog-grid'>
+        <div class='md3-empty md3-catalog__loading'>Загружаем каталог…</div>
+      </div>
+    </section>
+
+    <section class='md3-section' id='accounts'>
+      <header class='md3-section__header'>
+        <h2><span class='material-symbols-outlined'>person</span>Аккаунты</h2>
+      </header>
+      <article class='md3-card md3-card--elevated'>
+        <form class='md3-form md3-form--inline' method='post' action='/api/accounts'>
+          <div class='md3-textfield'>
+            <input id='acc-label' name='label' placeholder=' ' autocomplete='off' required>
+            <label for='acc-label'>Метка (например, main)</label>
+          </div>
+          <div class='md3-textfield'>
+            <input id='acc-phone' name='phone' placeholder=' ' autocomplete='off' required>
+            <label for='acc-phone'>Телефон, +79990000000</label>
+          </div>
+          <button type='submit' class='md3-btn md3-btn--filled'>
+            <span class='material-symbols-outlined'>add</span>Добавить
+          </button>
+        </form>
+        <ul class='md3-list'>{accounts_html}</ul>
+      </article>
+    </section>
+
+    <section class='md3-section' id='modules'>
+      <header class='md3-section__header'>
+        <h2><span class='material-symbols-outlined'>extension</span>Модули и конфиги</h2>
+      </header>
+      <div class='md3-card-grid' id='md3-cards'>{cards}</div>
     </section>
   </main>
 </div>
+
+<div id='md3-snackbar' class='md3-snackbar' role='status' aria-live='polite'></div>
+
+<script>
+(function() {{
+  // ---- Material You theme toggle (light / dark) ----
+  const KEY = 'md3-theme';
+  const root = document.documentElement;
+  const saved = localStorage.getItem(KEY);
+  const sysDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  if (saved) root.setAttribute('data-theme', saved);
+  else root.setAttribute('data-theme', sysDark ? 'dark' : 'light');
+
+  const btn = document.getElementById('md3-theme-toggle');
+  const updateIcon = () => {{
+    const dark = root.getAttribute('data-theme') === 'dark';
+    btn.querySelector('.material-symbols-outlined').textContent = dark ? 'light_mode' : 'dark_mode';
+  }};
+  updateIcon();
+  btn.addEventListener('click', () => {{
+    const next = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+    root.setAttribute('data-theme', next);
+    localStorage.setItem(KEY, next);
+    updateIcon();
+  }});
+
+  // ---- module search filter (rail + cards) ----
+  const search = document.getElementById('md3-search');
+  const rail = document.querySelectorAll('.md3-rail__item');
+  const cards = document.querySelectorAll('.md3-card.md3-card--filled');
+  search.addEventListener('input', () => {{
+    const q = search.value.trim().toLowerCase();
+    rail.forEach(el => {{
+      const m = el.dataset.module.toLowerCase();
+      el.style.display = (!q || m.includes(q)) ? '' : 'none';
+    }});
+    cards.forEach(card => {{
+      const title = card.querySelector('.md3-card__title');
+      const t = title ? title.textContent.trim().toLowerCase() : '';
+      card.style.display = (!q || t.includes(q)) ? '' : 'none';
+    }});
+  }});
+
+  // smooth scroll when clicking a rail item
+  rail.forEach(el => {{
+    el.addEventListener('click', () => {{
+      const name = el.dataset.module;
+      const card = Array.from(cards).find(c => {{
+        const t = c.querySelector('.md3-card__title');
+        return t && t.textContent.trim() === name;
+      }});
+      if (card) card.scrollIntoView({{behavior: 'smooth', block: 'start'}});
+    }});
+  }});
+
+  // ---- snackbar ----
+  const snack = document.getElementById('md3-snackbar');
+  const showSnack = (text) => {{
+    if (!text) return;
+    snack.textContent = text;
+    snack.classList.add('md3-snackbar--open');
+    clearTimeout(showSnack._t);
+    showSnack._t = setTimeout(() => snack.classList.remove('md3-snackbar--open'), 2400);
+  }};
+  showSnack({snackbar_text!r});
+
+  // ---- stats polling ----
+  const fmtUptime = (s) => {{
+    s = Math.max(0, Math.floor(s));
+    const d = Math.floor(s / 86400); s -= d*86400;
+    const h = Math.floor(s / 3600); s -= h*3600;
+    const m = Math.floor(s / 60); s -= m*60;
+    const parts = [];
+    if (d) parts.push(d + 'd');
+    if (h || d) parts.push(h + 'h');
+    if (m || h || d) parts.push(m + 'm');
+    parts.push(s + 's');
+    return parts.join(' ');
+  }};
+  const setText = (id, val) => {{
+    const el = document.getElementById(id); if (el) el.textContent = val;
+  }};
+  const fetchStats = async () => {{
+    try {{
+      const r = await fetch('/api/stats', {{cache: 'no-store'}});
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const s = await r.json();
+      setText('md3-stat-uptime', fmtUptime(s.uptime_seconds));
+      setText('md3-stat-modules', s.modules);
+      setText('md3-stat-commands', s.commands);
+      setText('md3-stat-watchers', s.watchers);
+      setText('md3-stat-accounts', s.accounts + ' / ' + s.accounts_authorized);
+      setText('md3-stat-pktin', s.packets_in);
+      setText('md3-stat-pktout', s.packets_out);
+      setText('md3-stat-cmdhandled', s.commands_handled);
+      const errBox = document.getElementById('md3-stat-error');
+      if (s.last_error_msg) {{
+        document.getElementById('md3-stat-error-msg').textContent = s.last_error_msg;
+        errBox.hidden = false;
+      }} else {{
+        errBox.hidden = true;
+      }}
+    }} catch (e) {{
+      const hint = document.getElementById('md3-stats-hint');
+      if (hint) hint.textContent = 'offline · ' + e.message;
+    }}
+  }};
+  fetchStats();
+  setInterval(fetchStats, 2000);
+
+  // ---- logs SSE ----
+  const LEVEL_RANK = {{DEBUG: 10, INFO: 20, WARNING: 30, ERROR: 40, CRITICAL: 50}};
+  const logView = document.getElementById('md3-log-view');
+  const levelSelect = document.getElementById('md3-log-level');
+  const pauseBtn = document.getElementById('md3-log-pause');
+  const clearBtn = document.getElementById('md3-log-clear');
+  let paused = false;
+  let buffered = [];
+  const MAX_LINES = 800;
+
+  const renderLog = (entry) => {{
+    const lvl = (entry.level || 'INFO').toUpperCase();
+    const cls = 'md3-log-' + lvl.toLowerCase();
+    const safe = (entry.msg || '').replace(/[&<>]/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;'}})[c]);
+    return `<span class="${{cls}}"><span class="md3-log-ts">${{entry.ts_iso || ''}}</span> <span class="md3-log-lvl">${{lvl}}</span> <span class="md3-log-name">${{(entry.name||'').replace(/[&<>]/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;'}})[c])}}</span> ${{safe}}</span>`;
+  }};
+
+  const flushView = () => {{
+    if (paused) return;
+    const minLevel = LEVEL_RANK[levelSelect.value] || 0;
+    const lines = buffered.filter(e => (LEVEL_RANK[(e.level||'').toUpperCase()] || 0) >= minLevel);
+    if (lines.length > MAX_LINES) lines.splice(0, lines.length - MAX_LINES);
+    logView.innerHTML = lines.map(renderLog).join('\\n');
+    logView.scrollTop = logView.scrollHeight;
+  }};
+
+  const appendLog = (entry) => {{
+    buffered.push(entry);
+    if (buffered.length > MAX_LINES * 2) buffered.splice(0, buffered.length - MAX_LINES * 2);
+    flushView();
+  }};
+
+  let es = null;
+  const connect = () => {{
+    if (es) es.close();
+    es = new EventSource('/api/logs/stream');
+    es.onmessage = (ev) => {{
+      try {{ appendLog(JSON.parse(ev.data)); }} catch (_) {{}}
+    }};
+    es.onerror = () => {{
+      // EventSource будет переподключаться автоматически.
+    }};
+  }};
+  connect();
+
+  levelSelect.addEventListener('change', flushView);
+  pauseBtn.addEventListener('click', () => {{
+    paused = !paused;
+    pauseBtn.querySelector('.material-symbols-outlined').textContent = paused ? 'play_arrow' : 'pause';
+    pauseBtn.querySelector('span:last-child').textContent = paused ? 'Возобновить' : 'Пауза';
+    if (!paused) flushView();
+  }});
+  clearBtn.addEventListener('click', () => {{
+    buffered = [];
+    flushView();
+  }});
+}})();
+
+// ---- catalog & unlock-modal ----
+(function() {{
+  const lockBtn = document.getElementById('md3-lock-toggle');
+  const lockIcon = document.getElementById('md3-lock-icon');
+  const modal = document.getElementById('md3-unlock-modal');
+  const desc = document.getElementById('md3-unlock-desc');
+  const passInput = document.getElementById('md3-unlock-pass');
+  const errBox = document.getElementById('md3-unlock-error');
+  const submitBtn = document.getElementById('md3-unlock-submit');
+  const grid = document.getElementById('md3-catalog-grid');
+  const hint = document.getElementById('md3-catalog-hint');
+
+  let authState = {{ password_configured: false, unlocked: true }};
+  let pendingAction = null;
+
+  const refreshAuthIcon = () => {{
+    if (!authState.password_configured) {{
+      lockIcon.textContent = 'no_encryption';
+      lockBtn.title = 'Пароль не задан';
+      lockBtn.classList.remove('lock-unlocked');
+    }} else if (authState.unlocked) {{
+      lockIcon.textContent = 'lock_open';
+      lockBtn.title = 'Сессия открыта — клик чтобы закрыть';
+      lockIcon.classList.add('lock-unlocked');
+    }} else {{
+      lockIcon.textContent = 'lock';
+      lockBtn.title = 'Сессия закрыта — клик чтобы открыть';
+      lockIcon.classList.remove('lock-unlocked');
+    }}
+  }};
+
+  const fetchAuth = async () => {{
+    try {{
+      const r = await fetch('/api/auth/status', {{credentials: 'same-origin'}});
+      authState = await r.json();
+    }} catch (_) {{}}
+    refreshAuthIcon();
+  }};
+
+  const openModal = (action, message) => {{
+    pendingAction = action;
+    desc.textContent = message || 'Введите пароль для опасных действий.';
+    errBox.hidden = true; errBox.textContent = '';
+    passInput.value = '';
+    modal.hidden = false;
+    setTimeout(() => passInput.focus(), 50);
+  }};
+  const closeModal = () => {{
+    modal.hidden = true;
+    pendingAction = null;
+  }};
+
+  modal.addEventListener('click', (e) => {{
+    if (e.target.dataset && e.target.dataset.close === '1') closeModal();
+  }});
+  document.addEventListener('keydown', (e) => {{
+    if (!modal.hidden && e.key === 'Escape') closeModal();
+  }});
+
+  submitBtn.addEventListener('click', async () => {{
+    const password = passInput.value;
+    if (!password) {{ errBox.textContent = 'Введите пароль.'; errBox.hidden = false; return; }}
+    submitBtn.disabled = true;
+    try {{
+      const fd = new FormData(); fd.append('password', password);
+      const r = await fetch('/api/auth/unlock', {{method: 'POST', body: fd, credentials: 'same-origin'}});
+      const data = await r.json().catch(() => ({{}}));
+      if (!r.ok || data.ok !== true) {{
+        errBox.textContent = data.reason === 'invalid' ? 'Неверный пароль.' : 'Не удалось открыть сессию.';
+        errBox.hidden = false;
+        return;
+      }}
+      authState.unlocked = true;
+      refreshAuthIcon();
+      const action = pendingAction;
+      closeModal();
+      if (typeof action === 'function') action();
+    }} finally {{
+      submitBtn.disabled = false;
+    }}
+  }});
+  passInput.addEventListener('keydown', (e) => {{ if (e.key === 'Enter') submitBtn.click(); }});
+
+  lockBtn.addEventListener('click', async () => {{
+    if (!authState.password_configured) {{
+      alert('Пароль не задан. Запустите бот в консоли — он попросит установить пароль при старте.');
+      return;
+    }}
+    if (authState.unlocked) {{
+      await fetch('/api/auth/lock', {{method: 'POST', credentials: 'same-origin'}});
+      authState.unlocked = false;
+      refreshAuthIcon();
+    }} else {{
+      openModal(null, 'Откройте сессию, чтобы выполнять опасные действия.');
+    }}
+  }});
+
+  // ---- catalog ----
+  // catalog.json может тянуться с произвольного MAX_CATALOG_URL — нельзя
+  // доверять полям. Все строки экранируем перед вставкой в HTML/атрибуты.
+  const escHtml = (s) => String(s == null ? '' : s).replace(
+    /[&<>"']/g,
+    (c) => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c])
+  );
+
+  const renderCard = (mod) => {{
+    const card = document.createElement('article');
+    card.className = 'md3-catalog__card';
+    const safeName = escHtml(mod.name);
+    const safeVersion = escHtml(mod.version);
+    const safeAuthor = escHtml(mod.author);
+    const safeDesc = escHtml(mod.description);
+    const tags = (mod.tags || []).map(t => `<span class="md3-catalog__tag">${{escHtml(t)}}</span>`).join('');
+    const badge = mod.installed
+      ? '<span class="md3-badge md3-badge--installed"><span class="material-symbols-outlined" style="font-size:14px">check_circle</span>Установлен</span>'
+      : '<span class="md3-badge md3-badge--available">Доступен</span>';
+    card.innerHTML = `
+      <div class='md3-catalog__head'>
+        <div>
+          <h3 class='md3-catalog__title'>${{safeName}}</h3>
+          <div class='md3-catalog__meta'>v${{safeVersion}}${{safeAuthor ? ' · ' + safeAuthor : ''}}</div>
+        </div>
+        ${{badge}}
+      </div>
+      <p class='md3-catalog__desc'>${{safeDesc}}</p>
+      <div class='md3-catalog__tags'>${{tags}}</div>
+      <div class='md3-catalog__actions'>
+        <button class='md3-btn md3-btn--filled' data-action='install' data-name='${{safeName}}' ${{mod.installed ? 'disabled' : ''}}>
+          <span class='material-symbols-outlined'>download</span><span>${{mod.installed ? 'Установлено' : 'Установить'}}</span>
+        </button>
+        ${{mod.installed
+          ? `<button class='md3-btn md3-btn--text' data-action='uninstall' data-name='${{safeName}}'><span class='material-symbols-outlined'>delete</span><span>Удалить</span></button>`
+          : ''}}
+      </div>
+    `;
+    return card;
+  }};
+
+  const loadCatalog = async () => {{
+    try {{
+      const r = await fetch('/api/catalog', {{credentials: 'same-origin'}});
+      if (!r.ok) throw new Error('http ' + r.status);
+      const data = await r.json();
+      grid.innerHTML = '';
+      if (!data.modules || !data.modules.length) {{
+        grid.innerHTML = '<div class="md3-empty">Каталог пуст. Задайте <code>MAX_CATALOG_URL</code> или отредактируйте <code>catalog.json</code>.</div>';
+        hint.textContent = '0 модулей';
+        return;
+      }}
+      data.modules.forEach(m => grid.appendChild(renderCard(m)));
+      hint.textContent = `${{data.modules.length}} модулей · источник: ${{data.source || 'локальный'}}`;
+    }} catch (e) {{
+      grid.innerHTML = '<div class="md3-empty">Не удалось загрузить каталог.</div>';
+      hint.textContent = 'offline';
+    }}
+  }};
+
+  const callInstall = async (name) => {{
+    const fd = new FormData(); fd.append('name', name);
+    const r = await fetch('/api/catalog/install', {{method: 'POST', body: fd, credentials: 'same-origin'}});
+    const data = await r.json().catch(() => ({{}}));
+    if (r.status === 403) return 'locked';
+    if (!r.ok || data.ok !== true) return 'error:' + (data.error || data.reason || r.status);
+    return 'ok:' + data.status;
+  }};
+  const callUninstall = async (name) => {{
+    const fd = new FormData(); fd.append('name', name);
+    const r = await fetch('/api/catalog/uninstall', {{method: 'POST', body: fd, credentials: 'same-origin'}});
+    const data = await r.json().catch(() => ({{}}));
+    if (r.status === 403) return 'locked';
+    if (!r.ok || data.ok !== true) return 'error:' + (data.error || data.reason || r.status);
+    return 'ok';
+  }};
+
+  grid.addEventListener('click', async (e) => {{
+    const btn = e.target.closest('button[data-action]');
+    if (!btn) return;
+    const name = btn.dataset.name;
+    const action = btn.dataset.action;
+    btn.disabled = true;
+    const exec = async () => {{
+      let res;
+      if (action === 'install') res = await callInstall(name);
+      else if (action === 'uninstall') res = await callUninstall(name);
+      else res = 'error:unknown';
+      if (res === 'locked') {{
+        openModal(exec, action === 'install' ? `Введите пароль, чтобы установить «${{name}}».` : `Введите пароль, чтобы удалить «${{name}}».`);
+      }} else if (res.startsWith('error:')) {{
+        alert('Ошибка: ' + res.slice(6));
+        btn.disabled = false;
+      }} else {{
+        await loadCatalog();
+      }}
+    }};
+    await exec();
+  }});
+
+  // ---- threats scanner ----
+  const threatsHost = document.getElementById('md3-threats-grid');
+  const threatsHint = document.getElementById('md3-threats-hint');
+
+  const SEV_LABEL = {{
+    critical: 'критично',
+    high: 'высокая',
+    medium: 'средняя',
+    ok: 'чисто',
+  }};
+
+  const renderThreatModule = (m) => {{
+    const card = document.createElement('article');
+    card.className = 'md3-threat-card md3-threat-card--' + m.severity;
+    const sevBadge = `<span class="md3-badge md3-badge--threat-${{m.severity}}">${{escHtml(SEV_LABEL[m.severity] || m.severity)}}</span>`;
+    const items = m.threats.map(t => `
+      <li>
+        <span class='label'>${{escHtml(t.label)}}</span>
+        <span class='meta'>${{escHtml(t.severity)}} · строка ${{t.line}}</span>
+        ${{t.snippet ? `<span class='snippet'>${{escHtml(t.snippet)}}</span>` : ''}}
+        <span class='meta'>${{escHtml(t.suggestion)}}</span>
+      </li>
+    `).join('');
+    const fileBase = (m.file || '').split('/').pop() || m.file;
+    card.innerHTML = `
+      <div class='md3-threat-card__head'>
+        <div>
+          <div class='md3-threat-card__title'>${{escHtml(m.module)}}</div>
+          <div class='md3-threat-card__file'>${{escHtml(fileBase)}}</div>
+        </div>
+        ${{sevBadge}}
+      </div>
+      <ul class='md3-threat-list'>${{items}}</ul>
+      <div class='md3-threat-card__actions'>
+        <button class='md3-btn md3-btn--filled' data-action='threat-remove' data-filename='${{escHtml(fileBase)}}'>
+          <span class='material-symbols-outlined'>delete_forever</span><span>Удалить модуль</span>
+        </button>
+      </div>
+    `;
+    return card;
+  }};
+
+  const loadThreats = async () => {{
+    try {{
+      const r = await fetch('/api/threats', {{credentials: 'same-origin'}});
+      if (!r.ok) throw new Error('http ' + r.status);
+      const data = await r.json();
+      const sum = data.summary || {{}};
+      threatsHost.innerHTML = '';
+
+      const summaryRow = document.createElement('div');
+      summaryRow.className = 'md3-threats__summary';
+      const pills = [
+        ['critical', 'критичных'],
+        ['high', 'высокая'],
+        ['medium', 'средняя'],
+        ['ok', 'чистых'],
+      ].map(([k, label]) => {{
+        const n = sum[k] || 0;
+        return `<span class='md3-badge md3-badge--threat-${{k}}'>${{n}} · ${{escHtml(label)}}</span>`;
+      }}).join('');
+      summaryRow.innerHTML = `<span class='md3-section__hint'>Всего модулей: ${{sum.total || 0}}</span>${{pills}}`;
+      threatsHost.appendChild(summaryRow);
+
+      const dangerous = (data.modules || []).filter(m => m.severity !== 'ok');
+      if (dangerous.length === 0) {{
+        const ok = document.createElement('div');
+        ok.className = 'md3-empty';
+        ok.textContent = 'Опасных паттернов не найдено в установленных модулях.';
+        threatsHost.appendChild(ok);
+      }} else {{
+        dangerous.sort((a, b) => {{
+          const order = {{ critical: 0, high: 1, medium: 2, ok: 3 }};
+          return (order[a.severity] || 9) - (order[b.severity] || 9);
+        }});
+        dangerous.forEach(m => threatsHost.appendChild(renderThreatModule(m)));
+      }}
+      threatsHint.textContent = `просканировано ${{sum.total || 0}} • опасных: ${{(sum.critical || 0) + (sum.high || 0)}}`;
+    }} catch (e) {{
+      threatsHint.textContent = 'оффлайн';
+      threatsHost.innerHTML = `<div class='md3-empty'>Сканер недоступен: ${{escHtml(e.message || e)}}</div>`;
+    }}
+  }};
+
+  document.addEventListener('click', async (ev) => {{
+    const btn = ev.target.closest('[data-action="threat-remove"]');
+    if (!btn) return;
+    const filename = btn.dataset.filename;
+    if (!filename) return;
+    if (!confirm('Удалить файл модуля «' + filename + '»? Действие необратимо.')) return;
+    btn.disabled = true;
+    const exec = async () => {{
+      const fd = new FormData();
+      fd.append('filename', filename);
+      const r = await fetch('/api/threats/remove', {{method: 'POST', body: fd, credentials: 'same-origin'}});
+      if (r.status === 403) {{
+        btn.disabled = false;
+        openModal(null, 'Удаление модуля требует unlock-сессию.');
+        return;
+      }}
+      if (r.ok) {{
+        await loadThreats();
+        await loadCatalog();
+      }} else {{
+        btn.disabled = false;
+        const t = await r.text();
+        alert('Не удалось удалить: ' + t);
+      }}
+    }};
+    await exec();
+  }});
+
+  fetchAuth();
+  loadCatalog();
+  loadThreats();
+}})();
+</script>
 </body>
 </html>
 """
         return web.Response(text=html_page, content_type="text/html")
 
     async def add_account(self, request: web.Request) -> web.Response:
+        if not self._is_request_unlocked(request):
+            raise web.HTTPFound("/?error=locked")
         data = await request.post()
         label = (data.get("label") or "").strip()
         phone = (data.get("phone") or "").strip()
         if not label or not phone:
             return web.Response(status=400, text="label and phone are required")
         self.account_store.add_or_update(AccountEntry(label=label, phone=phone, state="pending_auth"))
-        raise web.HTTPFound("/")
+        # Также синхронизируем с MultiAccountManager, если он используется в текущем процессе.
+        try:
+            from core.multiaccount import multiaccount_manager  # local import to avoid cycle on bare imports
+            if label not in multiaccount_manager.accounts:
+                from core.multiaccount import AccountEntry as MultiAccountEntry
+                multiaccount_manager.accounts[label] = MultiAccountEntry(label=label, phone=phone)
+                multiaccount_manager._save_accounts()
+        except Exception:  # noqa: BLE001 - синхронизация опциональна
+            logger.debug("MultiAccountManager недоступен для синхронизации", exc_info=True)
+        raise web.HTTPFound("/?saved=account")
 
     async def update_config(self, request: web.Request) -> web.Response:
         data = await request.post()
@@ -492,13 +1808,229 @@ body {{ margin:0; background:var(--bg); color:var(--text); font-family:Inter,Ari
             return web.Response(status=400, text="module and key are required")
         self.registry.module_config(self.config_store.data, module)[key] = value
         self.config_store.save()
-        raise web.HTTPFound("/")
+        raise web.HTTPFound("/?saved=config")
+
+    async def health(self, _: web.Request) -> web.Response:
+        accounts = self.account_store.load()
+        body = {
+            "status": "ok",
+            "uptime_seconds": int(time.time()) - START_TS,
+            "modules": len(self.registry.available_modules),
+            "accounts": len(accounts),
+        }
+        return web.json_response(body)
+
+    async def stats_endpoint(self, _: web.Request) -> web.Response:
+        accounts = self.account_store.load()
+        commands = sum(len(m.commands) for m in self.registry.available_modules)
+        body = {
+            "uptime_seconds": int(time.time()) - START_TS,
+            "modules": len(self.registry.available_modules),
+            "accounts": len(accounts),
+            "accounts_authorized": sum(1 for a in accounts if a.state == "authorized"),
+            "commands": commands,
+            "watchers": len(self.registry.packet_watchers),
+            "class_commands": len(self.registry.class_commands),
+            "packets_in": stats.packets_in,
+            "packets_out": stats.packets_out,
+            "commands_handled": stats.commands_handled,
+            "last_command_ts": stats.last_command_ts,
+            "last_error_ts": stats.last_error_ts,
+            "last_error_msg": stats.last_error_msg,
+        }
+        return web.json_response(body)
+
+    async def logs_history(self, request: web.Request) -> web.Response:
+        try:
+            limit = int(request.query.get("limit", "200"))
+        except ValueError:
+            limit = 200
+        return web.json_response({"records": log_buffer.snapshot(limit)})
+
+    async def logs_stream(self, request: web.Request) -> web.StreamResponse:
+        """Server-Sent Events стрим всех новых лог-записей."""
+        response = web.StreamResponse(
+            status=200,
+            reason="OK",
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+        await response.prepare(request)
+
+        # Сначала пушим последние 100 строк, чтобы клиент сразу увидел контекст.
+        for entry in log_buffer.snapshot(100):
+            await response.write(b"data: " + json.dumps(entry).encode() + b"\n\n")
+
+        queue = log_buffer.subscribe()
+        try:
+            while True:
+                try:
+                    entry = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    await response.write(b"data: " + json.dumps(entry).encode() + b"\n\n")
+                except asyncio.TimeoutError:
+                    # heartbeat-комментарий, чтобы прокси не разрывали connection
+                    await response.write(b": keepalive\n\n")
+        except (asyncio.CancelledError, ConnectionResetError):
+            pass
+        finally:
+            log_buffer.unsubscribe(queue)
+        return response
+
+    # ----------------------------- catalog & auth endpoints ---------------
+
+    UNLOCK_COOKIE = "max_unlock"
+
+    def _is_request_unlocked(self, request: web.Request) -> bool:
+        if not self.config_store.data.dangerous_password_hash:
+            return True
+        token = request.cookies.get(self.UNLOCK_COOKIE)
+        return session_manager.is_valid(token)
+
+    async def auth_status(self, request: web.Request) -> web.Response:
+        return web.json_response({
+            "password_configured": bool(self.config_store.data.dangerous_password_hash),
+            "unlocked": self._is_request_unlocked(request),
+            "active_sessions": session_manager.active_count(),
+        })
+
+    async def auth_unlock(self, request: web.Request) -> web.Response:
+        data = await request.post()
+        password = (data.get("password") or "").strip()
+        if not self.config_store.data.dangerous_password_hash:
+            return web.json_response({"ok": True, "reason": "no-password-configured"})
+        if not password:
+            return web.json_response({"ok": False, "reason": "empty"}, status=400)
+        ok = verify_password(
+            password,
+            self.config_store.data.dangerous_password_hash,
+            self.config_store.data.dangerous_password_salt,
+        )
+        if not ok:
+            logger.warning("Web UI unlock: неверный пароль")
+            return web.json_response({"ok": False, "reason": "invalid"}, status=401)
+        session = session_manager.create(label="webui")
+        response = web.json_response({"ok": True, "expires_in": session_manager.ttl})
+        response.set_cookie(
+            self.UNLOCK_COOKIE,
+            session.token,
+            max_age=session_manager.ttl,
+            httponly=True,
+            samesite="Strict",
+        )
+        logger.info("Web UI unlock: сессия открыта")
+        return response
+
+    async def auth_lock(self, request: web.Request) -> web.Response:
+        token = request.cookies.get(self.UNLOCK_COOKIE)
+        session_manager.revoke(token)
+        response = web.json_response({"ok": True})
+        response.del_cookie(self.UNLOCK_COOKIE)
+        return response
+
+    async def catalog_endpoint(self, _: web.Request) -> web.Response:
+        catalog = load_catalog()
+        return web.json_response({
+            "version": catalog.version,
+            "source": catalog.source,
+            "modules": annotate_installed(catalog, MODULES_DIR),
+        })
+
+    async def catalog_install(self, request: web.Request) -> web.Response:
+        if not self._is_request_unlocked(request):
+            return web.json_response({"ok": False, "reason": "locked"}, status=403)
+        data = await request.post()
+        name = (data.get("name") or "").strip()
+        if not name:
+            return web.json_response({"ok": False, "reason": "name required"}, status=400)
+        catalog = load_catalog()
+        entry: CatalogEntry | None = next(
+            (m for m in catalog.modules if m.name.lower() == name.lower()),
+            None,
+        )
+        if entry is None:
+            return web.json_response({"ok": False, "reason": "not-in-catalog"}, status=404)
+        result = install_module(entry, MODULES_DIR)
+        ok = result.status in {"installed", "up_to_date"}
+        body = {
+            "ok": ok,
+            "status": result.status,
+            "bytes_written": result.bytes_written,
+            "name": entry.name,
+            "filename": entry.filename,
+        }
+        if not ok:
+            body["error"] = result.error
+        if ok:
+            logger.info("Каталог: установлен %s (%s)", entry.name, result.status)
+        return web.json_response(body)
+
+    async def catalog_uninstall(self, request: web.Request) -> web.Response:
+        if not self._is_request_unlocked(request):
+            return web.json_response({"ok": False, "reason": "locked"}, status=403)
+        data = await request.post()
+        name = (data.get("name") or "").strip()
+        catalog = load_catalog()
+        entry = next(
+            (m for m in catalog.modules if m.name.lower() == name.lower()),
+            None,
+        )
+        filename = entry.filename if entry else (data.get("filename") or "").strip()
+        result = uninstall_module(filename, MODULES_DIR)
+        ok = result.status == "installed"
+        body = {"ok": ok, "status": result.status, "filename": filename}
+        if not ok:
+            body["error"] = result.error
+        if ok:
+            logger.info("Каталог: удалён %s", filename)
+        return web.json_response(body)
+
+    async def threats_endpoint(self, _: web.Request) -> web.Response:
+        from core.threat_scan import scan_directory, summary
+
+        scans = scan_directory(MODULES_DIR)
+        return web.json_response(
+            {
+                "summary": summary(scans),
+                "modules": [s.to_dict() for s in scans],
+            }
+        )
+
+    async def threat_remove(self, request: web.Request) -> web.Response:
+        if not self._is_request_unlocked(request):
+            return web.json_response({"ok": False, "reason": "locked"}, status=403)
+        data = await request.post()
+        filename = (data.get("filename") or "").strip()
+        # filename защищён внутри uninstall_module — никаких path traversal.
+        result = uninstall_module(filename, MODULES_DIR)
+        ok = result.status == "installed"
+        body = {"ok": ok, "status": result.status, "filename": filename}
+        if not ok:
+            body["error"] = result.error
+        else:
+            logger.info("Threat-scan: удалён модуль %s", filename)
+        return web.json_response(body)
 
     async def start(self) -> str:
         if self.runner is not None:
             return f"http://{self.host}:{self.port}"
         app = web.Application()
         app.router.add_get("/", self.index)
+        app.router.add_get("/health", self.health)
+        app.router.add_get("/api/stats", self.stats_endpoint)
+        app.router.add_get("/api/logs", self.logs_history)
+        app.router.add_get("/api/logs/stream", self.logs_stream)
+        app.router.add_get("/api/auth/status", self.auth_status)
+        app.router.add_post("/api/auth/unlock", self.auth_unlock)
+        app.router.add_post("/api/auth/lock", self.auth_lock)
+        app.router.add_get("/api/catalog", self.catalog_endpoint)
+        app.router.add_post("/api/catalog/install", self.catalog_install)
+        app.router.add_post("/api/catalog/uninstall", self.catalog_uninstall)
+        app.router.add_get("/api/threats", self.threats_endpoint)
+        app.router.add_post("/api/threats/remove", self.threat_remove)
         app.router.add_post("/api/accounts", self.add_account)
         app.router.add_post("/api/config", self.update_config)
         self.runner = web.AppRunner(app)
@@ -593,13 +2125,172 @@ async def try_login(client: MaxClient) -> None:
     account_store.add_or_update(AccountEntry(label="main", phone=phone, state="authorized", device_id=client.device_id, token=token))
 
 
+_TG_UNLOCKED: dict[str, float] = {}
+
+
+def _tg_session_active() -> bool:
+    """Активна ли в Telegram-канале unlock-сессия (одна на бот)."""
+    expires = _TG_UNLOCKED.get("default")
+    if expires is None:
+        return False
+    if expires < time.time():
+        _TG_UNLOCKED.pop("default", None)
+        return False
+    return True
+
+
+async def _ensure_unlocked(client: MaxClient, dst_chat: int, message_id: int, cmd: str) -> bool:
+    """Проверяет, можно ли выполнять опасную команду. Если нет — отвечает в чат."""
+    if cmd == "unlock":
+        return True
+    if not config_store.data.dangerous_password_hash:
+        # Пароль не задан — пропускаем (например, бот пока запущен впервые без сетапа).
+        return True
+    if _tg_session_active():
+        return True
+    await edit_message(
+        client,
+        dst_chat,
+        message_id,
+        "🔒 Команда требует unlock. Сначала выполните <code>.unlock &lt;пароль&gt;</code> "
+        "(сессия активна 10 минут).",
+    )
+    return False
+
+
 async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message_id: int, cmd: str, arg: str) -> bool:
     api = MaxApiExtensions(client)
     ctx = BotContext(client=client, registry=module_registry, api=api, config=config_store)
     destination_chat = resolve_destination_chat(packet.get("payload", {}), chat_id)
 
+    # ---- dangerous-команды требуют активную unlock-сессию ----
+    if is_dangerous(cmd):
+        ok = await _ensure_unlocked(client, destination_chat, message_id, cmd)
+        if not ok:
+            return True
+
+    if cmd == "unlock":
+        if not config_store.data.dangerous_password_hash:
+            await edit_message(client, destination_chat, message_id, "Пароль не задан — unlock не нужен.")
+            return True
+        if not arg:
+            await edit_message(client, destination_chat, message_id, "Использование: <code>.unlock &lt;пароль&gt;</code>")
+            return True
+        if verify_password(arg, config_store.data.dangerous_password_hash, config_store.data.dangerous_password_salt):
+            ttl = session_manager.ttl
+            _TG_UNLOCKED["default"] = time.time() + ttl
+            minutes = max(1, ttl // 60)
+            await edit_message(
+                client,
+                destination_chat,
+                message_id,
+                f"🔓 Сессия открыта на {minutes} мин.",
+            )
+            logger.info("Dangerous-actions сессия открыта (Telegram, TTL=%ss).", ttl)
+        else:
+            await edit_message(client, destination_chat, message_id, "❌ Неверный пароль.")
+            logger.warning("Неверный пароль .unlock от Telegram.")
+        return True
+
+    if cmd == "lock":
+        _TG_UNLOCKED.pop("default", None)
+        await edit_message(client, destination_chat, message_id, "🔒 Сессия закрыта.")
+        return True
+
+    if cmd == "catalog":
+        catalog = load_catalog()
+        rows = annotate_installed(catalog, MODULES_DIR)
+        if not rows:
+            await edit_message(client, destination_chat, message_id, "Каталог пуст.")
+            return True
+        lines = [f"<b>Каталог модулей</b> ({catalog.source or 'локальный'})"]
+        for r in rows:
+            mark = "✅" if r["installed"] else "⬜"
+            lines.append(
+                f"{mark} <b>{html.escape(r['name'])}</b> v{html.escape(r['version'])} — "
+                f"{html.escape(r['description'])}"
+            )
+        lines.append("\nУстановить: <code>.installmod &lt;name&gt;</code>")
+        await edit_message(client, destination_chat, message_id, "\n".join(lines))
+        return True
+
+    if cmd in {"threats", "scanmod"}:
+        from core.threat_scan import scan_directory, summary
+
+        scans = scan_directory(MODULES_DIR)
+        sm = summary(scans)
+        if not scans:
+            await edit_message(client, destination_chat, message_id, "В <code>modules/</code> нет .py файлов для сканирования.")
+            return True
+        lines = [
+            "<b>🛡 Сканер модулей</b>",
+            f"всего: {sm['total']} · "
+            f"критичных: {sm['critical']} · высокая: {sm['high']} · средняя: {sm['medium']} · чистых: {sm['ok']}",
+            "",
+        ]
+        ICON = {"critical": "🔴", "high": "🟠", "medium": "🟡", "ok": "🟢"}
+        for s in sorted(scans, key=lambda x: ("critical", "high", "medium", "ok").index(x.severity)):
+            if s.severity == "ok" and cmd == "threats":
+                continue
+            lines.append(f"{ICON[s.severity]} <b>{html.escape(s.module)}</b>")
+            for t in s.threats[:6]:
+                lines.append(
+                    f"  └ {html.escape(t.label)} (стр. {t.line})"
+                )
+            if len(s.threats) > 6:
+                lines.append(f"  …и ещё {len(s.threats) - 6} замечаний")
+        if len(lines) <= 3:
+            lines.append("✅ Опасных паттернов не найдено.")
+        else:
+            lines.append("\nУдалить опасный модуль: <code>.uninstallmod &lt;name&gt;</code>")
+        await edit_message(client, destination_chat, message_id, "\n".join(lines))
+        return True
+
+    if cmd == "installmod":
+        target_name = arg.strip()
+        if not target_name:
+            await edit_message(client, destination_chat, message_id, "Использование: <code>.installmod &lt;name&gt;</code>")
+            return True
+        catalog = load_catalog()
+        entry = next((m for m in catalog.modules if m.name.lower() == target_name.lower()), None)
+        if not entry:
+            await edit_message(client, destination_chat, message_id, f"Модуль <code>{html.escape(target_name)}</code> не найден в каталоге.")
+            return True
+        result = install_module(entry, MODULES_DIR)
+        if result.status == "installed":
+            await edit_message(client, destination_chat, message_id, f"📦 {html.escape(entry.name)} установлен ({result.bytes_written} B). Перезапустите бот для активации.")
+        elif result.status == "up_to_date":
+            await edit_message(client, destination_chat, message_id, f"📦 {html.escape(entry.name)} — уже установлен (актуальная версия).")
+        else:
+            await edit_message(client, destination_chat, message_id, f"❌ Ошибка установки: <code>{html.escape(result.error)}</code>")
+        return True
+
+    if cmd == "uninstallmod":
+        catalog = load_catalog()
+        entry = next((m for m in catalog.modules if m.name.lower() == arg.strip().lower()), None)
+        filename = entry.filename if entry else arg.strip()
+        result = uninstall_module(filename, MODULES_DIR)
+        if result.status == "installed":
+            await edit_message(client, destination_chat, message_id, f"🗑 {html.escape(filename)} удалён.")
+        else:
+            await edit_message(client, destination_chat, message_id, f"❌ {html.escape(result.error)}")
+        return True
+
     if cmd in {"modules", "ml"}:
         await edit_message(client, destination_chat, message_id, module_registry.render_modules())
+        return True
+
+    if cmd == "ping":
+        loop_start = time.perf_counter()
+        await asyncio.sleep(0)
+        loop_ms = (time.perf_counter() - loop_start) * 1000
+        uptime = int(time.time()) - START_TS
+        await edit_message(
+            client,
+            destination_chat,
+            message_id,
+            f"🏓 pong\nLoop latency: <code>{loop_ms:.2f} ms</code>\nUptime: <code>{uptime}s</code>",
+        )
         return True
 
     if cmd == "help":
@@ -627,10 +2318,11 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
         return True
 
     if cmd == "setprefix":
-        if not arg:
+        new_prefix = arg.strip()
+        if not new_prefix:
             await edit_message(client, destination_chat, message_id, f"Текущий префикс: <code>{html.escape(config_store.data.prefix)}</code>")
             return True
-        config_store.data.prefix = arg.strip()[0]
+        config_store.data.prefix = new_prefix[0]
         config_store.save()
         await edit_message(client, destination_chat, message_id, f"Префикс обновлён: <code>{html.escape(config_store.data.prefix)}</code>")
         return True
@@ -792,6 +2484,16 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
         await edit_message(client, destination_chat, message_id, f"Отправлено в chat_id={chosen}")
         return True
 
+    # Сначала пробуем class-based (Hikka-style) команды.
+    klass = module_registry.class_commands.get(cmd)
+    if klass:
+        from core import loader as core_loader
+        from core.message import MaxMessage
+
+        message_obj = MaxMessage(client, packet, registry=module_registry)
+        await core_loader.dispatch_command(klass, message_obj)
+        return True
+
     dyn = module_registry.dynamic_commands.get(cmd)
     if dyn:
         result = await dyn(ctx, destination_chat, message_id, arg)
@@ -802,6 +2504,7 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
 
 
 async def on_packet(client: MaxClient, packet: dict) -> None:
+    stats.packets_in += 1
     for watcher in module_registry.packet_watchers:
         try:
             await watcher(client, packet)
@@ -832,9 +2535,13 @@ async def on_packet(client: MaxClient, packet: dict) -> None:
 
     try:
         handled = await process_builtin(client, packet, int(chat_id), int(message_id), cmd.lower(), arg)
+        stats.commands_handled += 1
+        stats.last_command_ts = time.time()
         if not handled:
             await edit_message(client, int(chat_id), int(message_id), f"Неизвестная команда: <code>{html.escape(cmd)}</code>")
     except Exception as exc:  # noqa: BLE001
+        stats.last_error_ts = time.time()
+        stats.last_error_msg = f"{type(exc).__name__}: {exc}"
         logger.exception("Command processing failed")
         await edit_message(client, int(chat_id), int(message_id), f"Ошибка: <code>{html.escape(type(exc).__name__)}: {html.escape(str(exc))}</code>")
 
