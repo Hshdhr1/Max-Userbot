@@ -130,12 +130,14 @@ class EditTracker(loader.Module):
         for ev in reversed(events[-20:]):
             ts_h = time.strftime("%d.%m %H:%M:%S", time.localtime(ev["ts"] / 1000))
             sender = ev.get("sender") or "?"
+            # Сначала режем сырой текст, потом escape — иначе truncate
+            # может оборвать HTML-entity (`&amp;` → `&am`).
             if kind == "edited":
-                prev = utils.escape_html(ev.get("prev_text") or "(нет)")[:200]
-                cur = utils.escape_html(ev.get("text") or "")[:200]
+                prev = utils.escape_html((ev.get("prev_text") or "(нет)")[:200])
+                cur = utils.escape_html((ev.get("text") or "")[:200])
                 lines.append(f"<i>{ts_h}</i> · {sender}\n  было: <code>{prev}</code>\n  стало: <code>{cur}</code>")
             else:
-                txt = utils.escape_html(ev.get("text") or ev.get("prev_text") or "(пусто)")[:300]
+                txt = utils.escape_html((ev.get("text") or ev.get("prev_text") or "(пусто)")[:300])
                 lines.append(f"<i>{ts_h}</i> · {sender}: <code>{txt}</code>")
         await utils.answer(message, "\n".join(lines))
 
