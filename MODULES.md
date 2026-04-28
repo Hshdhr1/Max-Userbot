@@ -1,5 +1,15 @@
 # Module system
 
+> **SDK**: текущий userbot построен поверх библиотеки [`vkmax`](https://pypi.org/project/vkmax/).
+> Описание её WebSocket-протокола и таблица opcode'ов лежат в [`docs/MAX_PROTOCOL.md`](docs/MAX_PROTOCOL.md).
+>
+> Существует **отдельная** библиотека [PyMax](https://pymax.org)
+> (`pip install maxapi-python`) от MaxApiTeam — другой SDK для того же Max API
+> с другим интерфейсом (`@client.on_message()`, `Filters.text(...)`, поддержка
+> `attachment=File(path=...)`). Этот userbot её **не использует**, но если
+> в твоей задаче нужны фичи, которых нет в `vkmax`, PyMax — рабочая
+> альтернатива.
+
 В Max-Userbot **два** API для модулей:
 
 | API                       | Когда использовать                                          | Как пишется                          |

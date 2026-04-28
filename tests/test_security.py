@@ -71,14 +71,18 @@ class SessionManagerTests(unittest.TestCase):
 
 class DangerousFlagTests(unittest.TestCase):
     def test_known_dangerous(self):
-        for cmd in ("eval", "terminal", "dlm", "installmod", "addaccount"):
+        # Реально опасное: eval/shell/аккаунты/немедленный exec модуля.
+        for cmd in ("eval", "exec", "terminal", "shell", "addaccount",
+                    "loginacc", "loadmod", "lm", "dlm", "dlmod"):
             self.assertTrue(is_dangerous(cmd), cmd)
             self.assertTrue(is_dangerous(cmd.upper()))
 
-    def test_aliases_dangerous(self):
-        # Алиасы команд загрузки модулей не должны обходить unlock-проверку.
-        for cmd in ("lm", "dlmod", "ulm", "unloadmod"):
-            self.assertTrue(is_dangerous(cmd), cmd)
+    def test_catalog_install_is_not_dangerous(self):
+        # Установка из каталога и выгрузка из реестра — только файловые
+        # операции в `modules/` без exec(). Файл исполняется только после
+        # явного перезапуска и проходит threat_scan.
+        for cmd in ("installmod", "uninstallmod", "rmmod", "unloadmod", "ulm"):
+            self.assertFalse(is_dangerous(cmd), cmd)
 
     def test_unknown_safe(self):
         for cmd in ("ping", "modules", "help", "config"):
@@ -90,6 +94,9 @@ class DangerousFlagTests(unittest.TestCase):
         self.assertIn("terminal", DANGEROUS_COMMANDS)
         self.assertIn("loadmod", DANGEROUS_COMMANDS)
         self.assertIn("lm", DANGEROUS_COMMANDS)
+        self.assertIn("dlm", DANGEROUS_COMMANDS)
+        self.assertNotIn("installmod", DANGEROUS_COMMANDS)
+        self.assertNotIn("uninstallmod", DANGEROUS_COMMANDS)
 
 
 if __name__ == "__main__":

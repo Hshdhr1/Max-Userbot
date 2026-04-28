@@ -1940,8 +1940,9 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
         })
 
     async def catalog_install(self, request: web.Request) -> web.Response:
-        if not self._is_request_unlocked(request):
-            return web.json_response({"ok": False, "reason": "locked"}, status=403)
+        # Установка модуля из каталога не требует unlock: файл падает в
+        # `modules/`, проходит threat_scan и исполняется только после явного
+        # перезапуска. Опасным считается только выполнение кода внутри модуля.
         data = await request.post()
         name = (data.get("name") or "").strip()
         if not name:
@@ -1969,6 +1970,9 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
         return web.json_response(body)
 
     async def catalog_uninstall(self, request: web.Request) -> web.Response:
+        # Деструктивная операция (удаляет файл из `modules/`) — за unlock-gate
+        # по той же причине, что и `threat_remove`: при MAX_WEBUI_HOST=0.0.0.0
+        # endpoint доступен по сети.
         if not self._is_request_unlocked(request):
             return web.json_response({"ok": False, "reason": "locked"}, status=403)
         data = await request.post()
@@ -2000,6 +2004,9 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
         )
 
     async def threat_remove(self, request: web.Request) -> web.Response:
+        # Web UI может слушать на 0.0.0.0 — деструктивное удаление файлов
+        # модулей оставляем за unlock-gate, чтобы не дать unauthenticated
+        # сетевому клиенту выкосить установленные модули.
         if not self._is_request_unlocked(request):
             return web.json_response({"ok": False, "reason": "locked"}, status=403)
         data = await request.post()

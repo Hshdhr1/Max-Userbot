@@ -142,22 +142,20 @@ session_manager = SessionManager(ttl_seconds=int(os.getenv("MAX_UNLOCK_TTL", "60
 
 
 DANGEROUS_COMMANDS: set[str] = {
+    # Произвольное выполнение кода / shell.
     "eval",
     "exec",
     "terminal",
     "shell",
     "sh",
-    # download / load / unload module — все алиасы должны быть здесь, иначе
-    # `.lm` / `.dlmod` / `.ulm` обходят unlock-проверку.
-    "dlm",
-    "dlmod",
+    # Команды, которые НЕМЕДЛЕННО исполняют .py-файл в текущем
+    # процессе (`spec.loader.exec_module`). dlm ещё и скачивает с сети.
+    # Это эквивалент eval, их оставляем в dangerous.
     "loadmod",
     "lm",
-    "unloadmod",
-    "ulm",
-    "installmod",
-    "uninstallmod",
-    "rmmod",
+    "dlm",
+    "dlmod",
+    # Аккаунты — могут привести к угону сессии и разлогину.
     "addaccount",
     "loginacc",
     "deleteaccount",
@@ -165,6 +163,19 @@ DANGEROUS_COMMANDS: set[str] = {
     "removeaccount",
     "lock",
     "unlock",  # сама команда unlock не должна вечно требовать unlock'а — обработана отдельно
+}
+
+# Установка из каталога и выгрузка из реестра сами по себе НЕ опасны:
+# `installmod`/`uninstallmod` только пишут/удаляют .py-файлы в `modules/`,
+# файл проходит `core.threat_scan` и исполняется только после явного
+# перезапуска. `unloadmod`/`ulm` выкидывает из реестра, не исполняя код.
+# Этот список справочный, не используется как gate.
+SAFE_BUT_RECENTLY_DANGEROUS: set[str] = {
+    "installmod",
+    "uninstallmod",
+    "rmmod",
+    "unloadmod",
+    "ulm",
 }
 
 
