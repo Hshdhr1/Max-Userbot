@@ -71,17 +71,17 @@ class SessionManagerTests(unittest.TestCase):
 
 class DangerousFlagTests(unittest.TestCase):
     def test_known_dangerous(self):
-        # Реально опасное: исполнение кода, shell, аккаунты.
-        for cmd in ("eval", "exec", "terminal", "shell", "addaccount", "loginacc"):
+        # Реально опасное: eval/shell/аккаунты/немедленный exec модуля.
+        for cmd in ("eval", "exec", "terminal", "shell", "addaccount",
+                    "loginacc", "loadmod", "lm", "dlm", "dlmod"):
             self.assertTrue(is_dangerous(cmd), cmd)
             self.assertTrue(is_dangerous(cmd.upper()))
 
-    def test_module_loading_is_not_dangerous(self):
-        # Установка/выгрузка модуля сама по себе не опасна. Опасным
-        # считается только то, что модуль внутри себя пытается сделать —
-        # это ловит core.threat_scan на статическом анализе.
-        for cmd in ("lm", "dlm", "dlmod", "loadmod", "ulm", "unloadmod",
-                    "installmod", "uninstallmod", "rmmod"):
+    def test_catalog_install_is_not_dangerous(self):
+        # Установка из каталога и выгрузка из реестра — только файловые
+        # операции в `modules/` без exec(). Файл исполняется только после
+        # явного перезапуска и проходит threat_scan.
+        for cmd in ("installmod", "uninstallmod", "rmmod", "unloadmod", "ulm"):
             self.assertFalse(is_dangerous(cmd), cmd)
 
     def test_unknown_safe(self):
@@ -92,8 +92,11 @@ class DangerousFlagTests(unittest.TestCase):
         # Защищаемся от случайных регрессий.
         self.assertIn("eval", DANGEROUS_COMMANDS)
         self.assertIn("terminal", DANGEROUS_COMMANDS)
-        self.assertNotIn("loadmod", DANGEROUS_COMMANDS)
-        self.assertNotIn("lm", DANGEROUS_COMMANDS)
+        self.assertIn("loadmod", DANGEROUS_COMMANDS)
+        self.assertIn("lm", DANGEROUS_COMMANDS)
+        self.assertIn("dlm", DANGEROUS_COMMANDS)
+        self.assertNotIn("installmod", DANGEROUS_COMMANDS)
+        self.assertNotIn("uninstallmod", DANGEROUS_COMMANDS)
 
 
 if __name__ == "__main__":

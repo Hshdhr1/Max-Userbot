@@ -148,6 +148,13 @@ DANGEROUS_COMMANDS: set[str] = {
     "terminal",
     "shell",
     "sh",
+    # Команды, которые НЕМЕДЛЕННО исполняют .py-файл в текущем
+    # процессе (`spec.loader.exec_module`). dlm ещё и скачивает с сети.
+    # Это эквивалент eval, их оставляем в dangerous.
+    "loadmod",
+    "lm",
+    "dlm",
+    "dlmod",
     # Аккаунты — могут привести к угону сессии и разлогину.
     "addaccount",
     "loginacc",
@@ -158,21 +165,17 @@ DANGEROUS_COMMANDS: set[str] = {
     "unlock",  # сама команда unlock не должна вечно требовать unlock'а — обработана отдельно
 }
 
-# Установка / выгрузка модулей сама по себе НЕ опасна: модуль попадает
-# в каталог `modules/`, проходит сканер угроз (`core.threat_scan`) и не
-# исполняется автоматически до перезапуска. Опасным считается только то,
-# что модуль внутри себя пытается сделать (например, `os.system('fallocate
-# -l 19G')` или `subprocess(... shell=True)`) — это ловит сканер.
+# Установка из каталога и выгрузка из реестра сами по себе НЕ опасны:
+# `installmod`/`uninstallmod` только пишут/удаляют .py-файлы в `modules/`,
+# файл проходит `core.threat_scan` и исполняется только после явного
+# перезапуска. `unloadmod`/`ulm` выкидывает из реестра, не исполняя код.
+# Этот список справочный, не используется как gate.
 SAFE_BUT_RECENTLY_DANGEROUS: set[str] = {
-    "dlm",
-    "dlmod",
-    "loadmod",
-    "lm",
-    "unloadmod",
-    "ulm",
     "installmod",
     "uninstallmod",
     "rmmod",
+    "unloadmod",
+    "ulm",
 }
 
 

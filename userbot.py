@@ -2000,7 +2000,11 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
         )
 
     async def threat_remove(self, request: web.Request) -> web.Response:
-        # Удаление модуля по флагу threat_scan — обратная операция, не опасна.
+        # Web UI может слушать на 0.0.0.0 — деструктивное удаление файлов
+        # модулей оставляем за unlock-gate, чтобы не дать unauthenticated
+        # сетевому клиенту выкосить установленные модули.
+        if not self._is_request_unlocked(request):
+            return web.json_response({"ok": False, "reason": "locked"}, status=403)
         data = await request.post()
         filename = (data.get("filename") or "").strip()
         # filename защищён внутри uninstall_module — никаких path traversal.
