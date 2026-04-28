@@ -25,7 +25,13 @@ from core.catalog import (
     uninstall_module,
 )
 from core.log_buffer import log_buffer
-from core.security import is_dangerous, session_manager, verify_password
+from core.security import (
+    is_dangerous,
+    magic_link_manager,
+    session_manager,
+    verify_password,
+)
+from core import telemetry as telemetry_mod
 
 LOG_FORMAT = "[%(asctime)s] [%(levelname)s] %(name)s: %(message)s"
 DATE_FORMAT = "%d.%m.%Y %H:%M:%S"
@@ -59,6 +65,10 @@ class StatsCounters:
 
 
 stats = StatsCounters()
+
+# Анонимный счётчик команд для opt-in телеметрии. Лежит в памяти, по умолчанию
+# выключен (telemetry_enabled=False) — никаких внешних запросов до явного opt-in.
+telemetry_counters = telemetry_mod.TelemetryCounters()
 
 
 async def send_message(client: MaxClient, chat_id: int, text: str, *args: Any, **kwargs: Any) -> Any:
@@ -114,6 +124,14 @@ class UserbotConfig:
     # бот при старте интерактивно спросит пароль и сохранит в конфиг.
     dangerous_password_hash: str = ""
     dangerous_password_salt: str = ""
+    # Telemetry — opt-in, по умолчанию выключена. Бот в цикле раз в N секунд
+    # шлёт **анонимный** snapshot счётчиков на `telemetry_endpoint`. В payload
+    # никаких chat_id / sender_id / текста сообщений — только цифры (см.
+    # `core/telemetry.py`). `telemetry_anon_id` — стабильный ID этой инсталляции
+    # (random UUID4 при первом включении), не привязан к аккаунту.
+    telemetry_enabled: bool = False
+    telemetry_endpoint: str = ""
+    telemetry_anon_id: str = ""
 
 
 @dataclass
@@ -531,6 +549,17 @@ class WebUIManager:
   --md-sys-color-outline-variant: #CAC4D0;
   --md-sys-color-error: #B3261E;
   --md-sys-color-success: #146C2E;
+  /* Log viewer: подобраны под WCAG AA (>=4.5:1) на surface-container-highest. */
+  --log-bg: #F7F2FA;
+  --log-color-default: #1D1B20;
+  --log-color-ts: #5C5468;
+  --log-color-name: #1D192B;
+  --log-color-debug: #5C5468;
+  --log-color-info: #5240A1;
+  --log-color-warn: #8B5500;
+  --log-color-error: #B3261E;
+  --log-row-warn-bg: #FFF4D4;
+  --log-row-error-bg: #FCDCDC;
 }
 :root[data-theme="dark"] {
   --md-sys-color-primary: #D0BCFF;
@@ -553,6 +582,17 @@ class WebUIManager:
   --md-sys-color-outline-variant: #49454F;
   --md-sys-color-error: #F2B8B5;
   --md-sys-color-success: #74D690;
+  /* Log viewer (dark): фон стабильно тёмный, цвета — high-contrast tokens MD3. */
+  --log-bg: #1D1B20;
+  --log-color-default: #E6E1E5;
+  --log-color-ts: #CAC4D0;
+  --log-color-name: #F5EFFF;
+  --log-color-debug: #B0AAB8;
+  --log-color-info: #D0BCFF;
+  --log-color-warn: #FFD68A;
+  --log-color-error: #FFB4AB;
+  --log-row-warn-bg: rgba(255, 214, 138, 0.12);
+  --log-row-error-bg: rgba(255, 180, 171, 0.16);
 }
 
 * { box-sizing: border-box; }
@@ -1023,34 +1063,46 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
   margin: 0;
   height: 360px; overflow: auto;
   padding: 14px 18px;
-  background: var(--md-sys-color-surface-container-highest);
+  background: var(--log-bg);
   font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospace;
   font-size: 12.5px; line-height: 1.55;
-  color: var(--md-sys-color-on-surface);
+  color: var(--log-color-default);
   white-space: pre-wrap; word-break: break-word;
   scrollbar-width: thin;
 }
 .md3-log-view::-webkit-scrollbar { width: 8px; }
 .md3-log-view::-webkit-scrollbar-thumb { background: var(--md-sys-color-outline-variant); border-radius: 4px; }
-.md3-log-view > span { display: block; }
-.md3-log-ts { color: var(--md-sys-color-on-surface-variant); }
+.md3-log-view > span {
+  display: block;
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.md3-log-ts { color: var(--log-color-ts); }
 .md3-log-lvl {
   display: inline-block; min-width: 64px;
   padding: 0 6px; margin-right: 4px;
   border-radius: 4px;
   font-weight: 700; font-size: 11px;
-  background: var(--md-sys-color-surface-container);
+  background: color-mix(in srgb, var(--log-color-default) 12%, transparent);
+  color: var(--log-color-default);
 }
-.md3-log-name { color: var(--md-sys-color-primary); margin-right: 4px; }
-.md3-log-debug   .md3-log-lvl { color: var(--md-sys-color-on-surface-variant); }
-.md3-log-info    .md3-log-lvl { color: var(--md-sys-color-primary); }
-.md3-log-warning .md3-log-lvl { color: #FFB800; }
+.md3-log-name { color: var(--log-color-name); margin-right: 4px; font-weight: 600; }
+.md3-log-debug    { color: var(--log-color-debug); }
+.md3-log-debug   .md3-log-lvl { color: var(--log-color-debug); }
+.md3-log-info    .md3-log-lvl { color: var(--log-color-info); }
+.md3-log-warning,
+.md3-log-warn { background: var(--log-row-warn-bg); color: var(--log-color-warn); }
+.md3-log-warning .md3-log-lvl,
+.md3-log-warn    .md3-log-lvl {
+  color: var(--log-color-warn);
+  background: color-mix(in srgb, var(--log-color-warn) 22%, transparent);
+}
 .md3-log-error,
-.md3-log-critical { color: var(--md-sys-color-error); }
+.md3-log-critical { background: var(--log-row-error-bg); color: var(--log-color-error); }
 .md3-log-error    .md3-log-lvl,
 .md3-log-critical .md3-log-lvl {
-  background: color-mix(in srgb, var(--md-sys-color-error) 25%, transparent);
-  color: var(--md-sys-color-error);
+  background: color-mix(in srgb, var(--log-color-error) 22%, transparent);
+  color: var(--log-color-error);
 }
 .md3-select {
   padding: 8px 12px;
@@ -1297,6 +1349,35 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
 
 <script>
 (function() {{
+  // ---- Magic-link redeem on page load ----
+  // Если открыли URL вида /?t=<token> — отдаём токен в /api/magiclink/redeem
+  // и сразу чистим query-string (history.replaceState), чтобы токен
+  // не попал в Referer / закладки / историю.
+  (async function redeemMagicLink() {{
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get('t');
+    if (!token) return;
+    const fd = new FormData();
+    fd.append('t', token);
+    try {{
+      const resp = await fetch('/api/magiclink/redeem', {{ method: 'POST', body: fd }});
+      const url = new URL(window.location.href);
+      url.searchParams.delete('t');
+      window.history.replaceState({{}}, '', url.toString());
+      if (resp.ok) {{
+        const banner = document.createElement('div');
+        banner.style.cssText = 'position:fixed;top:0;left:0;right:0;padding:8px;text-align:center;background:var(--md-sys-color-primary-container);color:var(--md-sys-color-on-primary-container);font:var(--md-sys-typescale-body);z-index:9999';
+        banner.textContent = '🔓 Magic-link принят. Сессия открыта.';
+        document.body.appendChild(banner);
+        setTimeout(() => banner.remove(), 3000);
+      }} else {{
+        console.warn('magic-link rejected:', resp.status);
+      }}
+    }} catch (e) {{
+      console.error('magic-link redeem failed', e);
+    }}
+  }})();
+
   // ---- Material You theme toggle (light / dark) ----
   const KEY = 'md3-theme';
   const root = document.documentElement;
@@ -1931,6 +2012,76 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
         response.del_cookie(self.UNLOCK_COOKIE)
         return response
 
+    async def magiclink_redeem(self, request: web.Request) -> web.Response:
+        # Принимаем токен либо из POST-формы (UI), либо из querystring (на
+        # случай заранее открытой ссылки). Один токен — одно использование.
+        data = await request.post() if request.can_read_body else {}
+        token = (data.get("t") or request.query.get("t") or "").strip()
+        if not token:
+            return web.json_response({"ok": False, "reason": "no-token"}, status=400)
+        if not magic_link_manager.redeem(token):
+            return web.json_response(
+                {"ok": False, "reason": "invalid-or-expired"},
+                status=401,
+            )
+        # Magic-link приравнен к успешному unlock. Создаём обычную сессию.
+        session = session_manager.create(label="magiclink")
+        response = web.json_response({"ok": True, "expires_in": session_manager.ttl})
+        response.set_cookie(
+            self.UNLOCK_COOKIE,
+            session.token,
+            max_age=session_manager.ttl,
+            httponly=True,
+            samesite="Strict",
+        )
+        logger.info("Magic-link redeemed → unlock session открыта")
+        return response
+
+    async def telemetry_status(self, _: web.Request) -> web.Response:
+        cfg = self.config_store.data
+        return web.json_response({
+            "enabled": bool(cfg.telemetry_enabled),
+            "endpoint": cfg.telemetry_endpoint or "",
+            "anon_id": cfg.telemetry_anon_id or "",
+            "preview": telemetry_mod.build_payload(
+                anon_id=cfg.telemetry_anon_id or "(not generated yet)",
+                version=os.getenv("MAX_VERSION", "max-userbot/dev"),
+                uptime=int(time.time()) - START_TS,
+                modules_count=len(self.registry.modules),
+                commands_count=sum(len(m.commands) for m in self.registry.modules.values()),
+                watchers_count=len(getattr(self.registry, "watchers", [])),
+                accounts_total=len(self.account_store.load()),
+                accounts_authorized=sum(
+                    1 for a in self.account_store.load() if a.state == "authorized"
+                ),
+                packets_in=stats.packets_in,
+                packets_out=stats.packets_out,
+                commands_processed=stats.commands_handled,
+                top_commands=telemetry_counters.snapshot(top_n=10),
+            ),
+        })
+
+    async def telemetry_update(self, request: web.Request) -> web.Response:
+        # Изменение настроек телеметрии — за unlock-gate (это privacy-чувствительно).
+        if not self._is_request_unlocked(request):
+            return web.json_response({"ok": False, "reason": "locked"}, status=403)
+        data = await request.post()
+        cfg = self.config_store.data
+        enabled_raw = (data.get("enabled") or "").strip().lower()
+        if enabled_raw in {"1", "true", "on", "yes"}:
+            cfg.telemetry_enabled = True
+        elif enabled_raw in {"0", "false", "off", "no"}:
+            cfg.telemetry_enabled = False
+        endpoint = (data.get("endpoint") or "").strip()
+        if endpoint:
+            cfg.telemetry_endpoint = endpoint
+        if cfg.telemetry_enabled and not cfg.telemetry_anon_id:
+            cfg.telemetry_anon_id = telemetry_mod.make_anon_id()
+        self.config_store.save()
+        return web.json_response({"ok": True, "enabled": cfg.telemetry_enabled,
+                                  "endpoint": cfg.telemetry_endpoint,
+                                  "anon_id": cfg.telemetry_anon_id})
+
     async def catalog_endpoint(self, _: web.Request) -> web.Response:
         catalog = load_catalog()
         return web.json_response({
@@ -2026,6 +2177,9 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
         app.router.add_get("/api/auth/status", self.auth_status)
         app.router.add_post("/api/auth/unlock", self.auth_unlock)
         app.router.add_post("/api/auth/lock", self.auth_lock)
+        app.router.add_post("/api/magiclink/redeem", self.magiclink_redeem)
+        app.router.add_get("/api/telemetry", self.telemetry_status)
+        app.router.add_post("/api/telemetry", self.telemetry_update)
         app.router.add_get("/api/catalog", self.catalog_endpoint)
         app.router.add_post("/api/catalog/install", self.catalog_install)
         app.router.add_post("/api/catalog/uninstall", self.catalog_uninstall)
@@ -2348,9 +2502,79 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
         await edit_message(client, destination_chat, message_id, "Конфиг обновлён")
         return True
 
+    if cmd == "telemetry":
+        cfg = config_store.data
+        sub = (arg.strip().split() or [""])[0].lower()
+        if sub in {"", "status"}:
+            state = "включена" if cfg.telemetry_enabled else "выключена"
+            ep = cfg.telemetry_endpoint or "(не задан)"
+            anon = cfg.telemetry_anon_id[:12] + "…" if cfg.telemetry_anon_id else "(нет)"
+            await edit_message(client, destination_chat, message_id,
+                f"<b>Telemetry:</b> {state}\nendpoint: <code>{html.escape(ep)}</code>\nanon_id: <code>{html.escape(anon)}</code>\n\n"
+                "Команды: .telemetry on|off|preview|endpoint &lt;url&gt;",
+            )
+            return True
+        if sub == "on":
+            cfg.telemetry_enabled = True
+            if not cfg.telemetry_anon_id:
+                cfg.telemetry_anon_id = telemetry_mod.make_anon_id()
+            config_store.save()
+            await edit_message(client, destination_chat, message_id, "📡 Telemetry включена.")
+            return True
+        if sub == "off":
+            cfg.telemetry_enabled = False
+            config_store.save()
+            await edit_message(client, destination_chat, message_id, "📴 Telemetry выключена.")
+            return True
+        if sub == "endpoint":
+            new_ep = arg.split(maxsplit=1)[1] if len(arg.split(maxsplit=1)) > 1 else ""
+            cfg.telemetry_endpoint = new_ep.strip()
+            config_store.save()
+            await edit_message(client, destination_chat, message_id,
+                f"Endpoint: <code>{html.escape(cfg.telemetry_endpoint or '(пусто)')}</code>")
+            return True
+        if sub == "preview":
+            payload = telemetry_mod.build_payload(
+                anon_id=cfg.telemetry_anon_id or "(not generated yet)",
+                version=os.getenv("MAX_VERSION", "max-userbot/dev"),
+                uptime=int(time.time()) - START_TS,
+                modules_count=len(module_registry.modules),
+                commands_count=sum(len(m.commands) for m in module_registry.modules.values()),
+                watchers_count=len(getattr(module_registry, "watchers", [])),
+                accounts_total=len(account_store.load()),
+                accounts_authorized=sum(1 for a in account_store.load() if a.state == "authorized"),
+                packets_in=stats.packets_in,
+                packets_out=stats.packets_out,
+                commands_processed=stats.commands_handled,
+                top_commands=telemetry_counters.snapshot(top_n=10),
+            )
+            await edit_message(client, destination_chat, message_id,
+                f"<b>Telemetry preview:</b>\n<code>{html.escape(json.dumps(payload, ensure_ascii=False, indent=2))}</code>")
+            return True
+        await edit_message(client, destination_chat, message_id, "Неизвестная подкоманда. .telemetry status|on|off|preview|endpoint &lt;url&gt;")
+        return True
+
     if cmd == "weburl":
         url = await webui.start()
-        await edit_message(client, destination_chat, message_id, f"Web UI: <code>{html.escape(url)}</code>")
+        # Если задан пароль — выдаём одноразовый magic-link, чтобы не вводить
+        # пароль вручную при открытии UI с телефона. Без пароля — ссылка
+        # обычная, никаких токенов не нужно.
+        if config_store.data.dangerous_password_hash:
+            link = magic_link_manager.issue()
+            magic_url = f"{url}/?t={link.token}"
+            ttl_min = max(1, magic_link_manager.ttl // 60)
+            await edit_message(
+                client,
+                destination_chat,
+                message_id,
+                (
+                    f"Web UI: <code>{html.escape(url)}</code>\n"
+                    f"🔗 Magic-link (одноразовый, истекает через {ttl_min} мин):\n"
+                    f"<code>{html.escape(magic_url)}</code>"
+                ),
+            )
+        else:
+            await edit_message(client, destination_chat, message_id, f"Web UI: <code>{html.escape(url)}</code>")
         return True
 
     if cmd == "addacc":
@@ -2537,6 +2761,8 @@ async def on_packet(client: MaxClient, packet: dict) -> None:
         handled = await process_builtin(client, packet, int(chat_id), int(message_id), cmd.lower(), arg)
         stats.commands_handled += 1
         stats.last_command_ts = time.time()
+        # Только имя команды (без аргументов) — для top_commands в telemetry.
+        telemetry_counters.record(cmd.lower())
         if not handled:
             await edit_message(client, int(chat_id), int(message_id), f"Неизвестная команда: <code>{html.escape(cmd)}</code>")
     except Exception as exc:  # noqa: BLE001
@@ -2544,6 +2770,42 @@ async def on_packet(client: MaxClient, packet: dict) -> None:
         stats.last_error_msg = f"{type(exc).__name__}: {exc}"
         logger.exception("Command processing failed")
         await edit_message(client, int(chat_id), int(message_id), f"Ошибка: <code>{html.escape(type(exc).__name__)}: {html.escape(str(exc))}</code>")
+
+
+async def telemetry_loop(interval: int = 3600) -> None:
+    """Раз в `interval` секунд шлёт payload, если телеметрия включена.
+
+    Полностью no-op пока `telemetry_enabled=False` — никаких сетевых запросов
+    до явного opt-in. На каждый цикл проверяет конфиг заново, так что включение
+    через `.telemetry on` подхватится в течение `interval`.
+    """
+    while True:
+        try:
+            cfg = config_store.data
+            if cfg.telemetry_enabled and cfg.telemetry_endpoint and cfg.telemetry_anon_id:
+                payload = telemetry_mod.build_payload(
+                    anon_id=cfg.telemetry_anon_id,
+                    version=os.getenv("MAX_VERSION", "max-userbot/dev"),
+                    uptime=int(time.time()) - START_TS,
+                    modules_count=len(module_registry.modules),
+                    commands_count=sum(len(m.commands) for m in module_registry.modules.values()),
+                    watchers_count=len(getattr(module_registry, "watchers", [])),
+                    accounts_total=len(account_store.load()),
+                    accounts_authorized=sum(
+                        1 for a in account_store.load() if a.state == "authorized"
+                    ),
+                    packets_in=stats.packets_in,
+                    packets_out=stats.packets_out,
+                    commands_processed=stats.commands_handled,
+                    top_commands=telemetry_counters.snapshot(top_n=10),
+                )
+                # Финальная проверка: тест assert_no_pii не должен сработать
+                # на runtime, но пусть будет на всякий случай.
+                telemetry_mod.assert_no_pii(payload)
+                await telemetry_mod.send_payload(cfg.telemetry_endpoint, payload)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("telemetry_loop iteration failed: %s", exc)
+        await asyncio.sleep(interval)
 
 
 async def main() -> None:
@@ -2554,10 +2816,14 @@ async def main() -> None:
     await try_login(client)
     await client.set_callback(on_packet)
 
+    # Background telemetry; полностью no-op пока юзер не включил opt-in.
+    telemetry_task = asyncio.create_task(telemetry_loop())
+
     logger.info("MAX Userbot started")
     try:
         await asyncio.Future()
     finally:
+        telemetry_task.cancel()
         await webui.stop()
         await weather_client.close()
 
