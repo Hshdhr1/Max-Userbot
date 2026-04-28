@@ -1970,7 +1970,11 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
         return web.json_response(body)
 
     async def catalog_uninstall(self, request: web.Request) -> web.Response:
-        # Удаление модуля тоже не требует unlock — это обратная операция.
+        # Деструктивная операция (удаляет файл из `modules/`) — за unlock-gate
+        # по той же причине, что и `threat_remove`: при MAX_WEBUI_HOST=0.0.0.0
+        # endpoint доступен по сети.
+        if not self._is_request_unlocked(request):
+            return web.json_response({"ok": False, "reason": "locked"}, status=403)
         data = await request.post()
         name = (data.get("name") or "").strip()
         catalog = load_catalog()
