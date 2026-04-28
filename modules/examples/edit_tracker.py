@@ -146,8 +146,9 @@ class EditTracker(loader.Module):
         if self.db is None:
             await utils.answer(message, "DB недоступна")
             return
-        # Собираем счётчики по всем chat:*:* ключам.
-        ns = self.db._data.get(NAMESPACE, {}) if hasattr(self.db, "_data") else {}
+        # Собираем счётчики по всем chat:*:* ключам через публичный API
+        # (под локом, копия — никаких гонок и обращений к _data).
+        ns = self.db.all(NAMESPACE) if hasattr(self.db, "all") else {}
         chats: dict[int, dict[str, int]] = {}
         for k, v in ns.items():
             # k = "chat:<id>:<kind>"
