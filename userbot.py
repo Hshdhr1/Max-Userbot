@@ -2049,7 +2049,7 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
                 uptime=int(time.time()) - START_TS,
                 modules_count=len(self.registry.modules),
                 commands_count=sum(len(m.commands) for m in self.registry.modules.values()),
-                watchers_count=len(getattr(self.registry, "watchers", [])),
+                watchers_count=len(self.registry.packet_watchers),
                 accounts_total=len(self.account_store.load()),
                 accounts_authorized=sum(
                     1 for a in self.account_store.load() if a.state == "authorized"
@@ -2540,7 +2540,7 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
                 uptime=int(time.time()) - START_TS,
                 modules_count=len(module_registry.modules),
                 commands_count=sum(len(m.commands) for m in module_registry.modules.values()),
-                watchers_count=len(getattr(module_registry, "watchers", [])),
+                watchers_count=len(module_registry.packet_watchers),
                 accounts_total=len(account_store.load()),
                 accounts_authorized=sum(1 for a in account_store.load() if a.state == "authorized"),
                 packets_in=stats.packets_in,
@@ -2789,7 +2789,7 @@ async def telemetry_loop(interval: int = 3600) -> None:
                     uptime=int(time.time()) - START_TS,
                     modules_count=len(module_registry.modules),
                     commands_count=sum(len(m.commands) for m in module_registry.modules.values()),
-                    watchers_count=len(getattr(module_registry, "watchers", [])),
+                    watchers_count=len(module_registry.packet_watchers),
                     accounts_total=len(account_store.load()),
                     accounts_authorized=sum(
                         1 for a in account_store.load() if a.state == "authorized"
