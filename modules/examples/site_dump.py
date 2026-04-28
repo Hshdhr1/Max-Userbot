@@ -143,6 +143,7 @@ class SiteDump(loader.Module):
 
         max_pages = int(self.config["max_pages"])
         max_depth = int(self.config["max_depth"])
+        same_domain_only = bool(self.config["same_domain_only"])
 
         if mode == "full":
             await utils.answer(
@@ -169,6 +170,7 @@ class SiteDump(loader.Module):
                 mode=mode,
                 max_pages=max_pages,
                 max_depth=max_depth,
+                same_domain_only=same_domain_only,
             )
         except UrlValidationError as e:
             await utils.answer(message, f"❌ Невалидный URL: {utils.escape_html(str(e))}")

@@ -508,6 +508,7 @@ async def dump_url(
     mode: str = "single",
     max_pages: int = 30,
     max_depth: int = 2,
+    same_domain_only: bool = True,
 ) -> DumpResult:
     """Главный entry: single page или full site → PDF → publish."""
     if mode == "full":
@@ -518,6 +519,7 @@ async def dump_url(
             renderer=renderer,
             max_pages=max_pages,
             max_depth=max_depth,
+            same_domain_only=same_domain_only,
         )
         pub = await publish_pdf(result.pdf_path, provider=upload)
         return DumpResult(

@@ -278,6 +278,27 @@ class FullModeDumpUrlTests(unittest.TestCase):
 
         run(case())
 
+    def test_same_domain_only_is_forwarded(self):
+        async def case():
+            fake_pdf = Path("/tmp/fake-sdo.pdf")
+            fake_pdf.write_bytes(b"%PDF-1.4 stub")
+            try:
+                from core.site_dump import FullSiteResult
+                fsr = FullSiteResult(pdf_path=fake_pdf, pages=[], rendered=1, skipped=0)
+                with mock.patch("core.site_dump.render_full_site", return_value=fsr) as m:
+                    await dump_url(
+                        "https://example.com/",
+                        upload="none",
+                        mode="full",
+                        same_domain_only=False,
+                    )
+                _, kwargs = m.call_args
+                self.assertIs(kwargs["same_domain_only"], False)
+            finally:
+                fake_pdf.unlink(missing_ok=True)
+
+        run(case())
+
     def test_single_mode_does_not_crawl(self):
         async def case():
             fake_pdf = Path("/tmp/fake-single.pdf")
