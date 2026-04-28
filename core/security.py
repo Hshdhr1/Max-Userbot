@@ -138,6 +138,80 @@ class SessionManager:
 session_manager = SessionManager(ttl_seconds=int(os.getenv("MAX_UNLOCK_TTL", "600")))
 
 
+# ----------------------------- magic-link manager ---------------------------
+
+
+@dataclass
+class _MagicLink:
+    token: str
+    expires_at: float
+    used: bool = False
+
+
+class MagicLinkManager:
+    """Одноразовые URL-токены для входа в Web UI без пароля.
+
+    Жизненный цикл:
+        1. `.weburl` в Telegram вызывает `issue()` → выдаётся токен с коротким TTL.
+        2. Юзер открывает `http://host:port/?t=<token>`.
+        3. Фронт POST'ит на `/api/magiclink/redeem` → бэк вызывает `redeem()`.
+        4. Если токен валиден и не использован — он помечается `used=True`,
+           и юзер получает обычную unlock-сессию через `SessionManager`.
+
+    Никаких БД: токены живут только в памяти, при рестарте бот всех «забывает».
+    """
+
+    def __init__(self, ttl_seconds: int = 300) -> None:
+        self.ttl = ttl_seconds
+        self._lock = threading.Lock()
+        self._links: dict[str, _MagicLink] = {}
+
+    def issue(self) -> _MagicLink:
+        token = secrets.token_urlsafe(32)
+        link = _MagicLink(token=token, expires_at=time.time() + self.ttl)
+        with self._lock:
+            # Чтобы in-memory не разрастался — заодно вычистим просрочку.
+            self._cleanup_locked()
+            self._links[token] = link
+        return link
+
+    def redeem(self, token: str | None) -> bool:
+        """Проверяет одноразовость и валидность токена.
+
+        Возвращает True если токен валиден и теперь помечен использованным.
+        Повторный вызов с тем же токеном вернёт False.
+        """
+        if not token:
+            return False
+        with self._lock:
+            link = self._links.get(token)
+            if link is None:
+                return False
+            if link.used:
+                return False
+            if link.expires_at < time.time():
+                self._links.pop(token, None)
+                return False
+            link.used = True
+            return True
+
+    def _cleanup_locked(self) -> None:
+        now = time.time()
+        expired = [t for t, lk in self._links.items() if lk.expires_at < now]
+        for t in expired:
+            self._links.pop(t, None)
+
+    def active_count(self) -> int:
+        with self._lock:
+            self._cleanup_locked()
+            return len(self._links)
+
+
+magic_link_manager = MagicLinkManager(
+    ttl_seconds=int(os.getenv("MAX_MAGICLINK_TTL", "300")),
+)
+
+
 # ------------------------------- dangerous list ------------------------------
 
 
@@ -177,6 +251,8 @@ __all__ = [
     "verify_password",
     "SessionManager",
     "session_manager",
+    "MagicLinkManager",
+    "magic_link_manager",
     "is_dangerous",
     "DANGEROUS_COMMANDS",
 ]

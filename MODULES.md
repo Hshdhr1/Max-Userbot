@@ -283,3 +283,63 @@ Endpoints:
 - `GET /api/auth/status` → `{password_configured, unlocked, active_sessions}`.
 - `POST /api/auth/unlock` (form: `password`) → ставит httpOnly-cookie `max_unlock`.
 - `POST /api/auth/lock` → удаляет cookie и отзывает токен.
+- `POST /api/magiclink/redeem` (form: `t`) → принимает одноразовый magic-link
+  токен и открывает unlock-сессию (см. ниже).
+
+## Magic-link для Web UI
+
+Если задан пароль для опасных действий — открывать Web UI с телефона
+неудобно: каждый раз вводить пароль. Решение — одноразовая ссылка из
+Telegram-команды:
+
+```
+.weburl
+→ Web UI: http://127.0.0.1:8088
+  🔗 Magic-link (одноразовый, истекает через 5 мин):
+  http://127.0.0.1:8088/?t=<token>
+```
+
+Открываешь ссылку — браузер сразу делает `POST /api/magiclink/redeem`,
+получает обычную unlock-сессию (TTL = `MAX_UNLOCK_TTL`), и токен
+вычищается из URL через `history.replaceState` (не попадает в Referer
+и историю браузера).
+
+Параметры:
+
+- `MAX_MAGICLINK_TTL` (env, default `300`) — сколько секунд живёт
+  выпущенный токен.
+- Каждый токен **одноразовый** — после успешного redeem он
+  помечается `used=True` и второй раз не сработает.
+- Хранилище токенов — только в памяти процесса. Рестарт бота → все
+  активные magic-link инвалидируются.
+
+## Анонимная opt-in телеметрия
+
+По умолчанию **выключена**. Включается явно — `.telemetry on` в Telegram
+или тумблер в Web UI. После включения раз в час (`telemetry_loop`) бот
+шлёт компактный JSON со счётчиками на `telemetry_endpoint`:
+
+- `anon_id` — SHA-256 от случайного UUID4, генерируется при первом opt-in.
+  Не привязан к аккаунту, между инсталляциями уникален.
+- `version`, `uptime`, `modules_count`, `commands_count`, `watchers_count`.
+- `accounts.{total, authorized}`, `packets_in`, `packets_out`,
+  `commands_processed`.
+- `top_commands` — `Counter` имён команд (без аргументов).
+
+В payload **не** попадают: `chat_id`, `sender_id`, `phone`, `text`,
+`message`, `filename`, `path`, `ip`, `token`, `password`. Это
+гарантирует функция `core.telemetry.assert_no_pii()` (вызывается перед
+каждой отправкой) и тесты в `tests/test_telemetry.py`.
+
+Команды:
+
+- `.telemetry status` — текущее состояние.
+- `.telemetry on` / `.telemetry off`.
+- `.telemetry endpoint <url>`.
+- `.telemetry preview` — печатает payload, который был бы отправлен
+  прямо сейчас. Полезно посмотреть «а что туда попадает».
+
+Endpoints:
+
+- `GET /api/telemetry` → `{enabled, endpoint, anon_id, preview}`.
+- `POST /api/telemetry` (form: `enabled`, `endpoint`) — за unlock-gate.
