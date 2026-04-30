@@ -1360,7 +1360,9 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
     const fd = new FormData();
     fd.append('t', token);
     try {{
-      const resp = await fetch('/api/magiclink/redeem', {{ method: 'POST', body: fd }});
+      // credentials:'same-origin' — в этом фетче критично принять Set-Cookie
+      // (иначе в старых/встроенных браузерах cookie может быть потеряна).
+      const resp = await fetch('/api/magiclink/redeem', {{ method: 'POST', body: fd, credentials: 'same-origin' }});
       const url = new URL(window.location.href);
       url.searchParams.delete('t');
       window.history.replaceState({{}}, '', url.toString());
@@ -1370,6 +1372,9 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
         banner.textContent = '🔓 Magic-link принят. Сессия открыта.';
         document.body.appendChild(banner);
         setTimeout(() => banner.remove(), 3000);
+        // IIFE с fetchAuth живёт в другом замыкании — посылаем ему событие,
+        // чтобы он обновил lock-иконку в app bar (иначе она останется locked).
+        window.dispatchEvent(new CustomEvent('max-auth-changed'));
       }} else {{
         console.warn('magic-link rejected:', resp.status);
       }}
@@ -1851,6 +1856,9 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
   }});
 
   fetchAuth();
+  // Обновляем lock-иконку когда magic-link redeem успешно поставил cookie
+  // (событие из IIFE redeemMagicLink выше).
+  window.addEventListener('max-auth-changed', () => fetchAuth());
   loadCatalog();
   loadThreats();
 }})();
