@@ -50,6 +50,7 @@ CONFIG_FILE = Path("userbot_config.json")
 ACCOUNTS_FILE = Path("accounts.json")
 DEFAULT_PREFIX = "."
 START_TS = int(time.time())
+__version__ = "2.1.0"
 
 
 # ------------------------------- stats / counters ----------------------------
@@ -284,6 +285,8 @@ class ModuleRegistry:
     packet_watchers: list[PacketWatcher] = field(default_factory=list)
     # Hikka-совместимые команды: имя -> (instance, async-метод)
     class_commands: dict[str, tuple[Any, Callable[..., Awaitable[Any]]]] = field(default_factory=dict)
+    # Callback-обработчики: (instance, async-метод)
+    callback_handlers: list[tuple[Any, Callable[..., Awaitable[Any]]]] = field(default_factory=list)
 
     def register_module(self, module: BotModule) -> None:
         key = module.name.lower()
@@ -298,6 +301,17 @@ class ModuleRegistry:
 
     def register_watcher(self, callback: PacketWatcher) -> None:
         self.packet_watchers.append(callback)
+
+    def register_callback_handler(self, callback: Callable) -> None:
+        self.callback_handlers.append(callback)
+
+    async def dispatch_callback(self, call: Any) -> None:
+        """Вызов всех зарегистрированных callback-обработчиков."""
+        for instance, method in self.callback_handlers:
+            try:
+                await method(call)
+            except Exception:
+                logger.exception("Callback handler failed")
 
     def preload_default_modules(self) -> None:
         def c(name: str, description: str, aliases: Optional[list[str]] = None) -> ModuleCommand:
@@ -315,7 +329,7 @@ class ModuleRegistry:
             BotModule("Settings", "Базовые настройки", [
                 c("addalias", "Добавить алиас"), c("aliases", "Показать алиасы"), c("blacklist", "Отключить бота в чате"),
                 c("blacklistuser", "Запретить юзеру"), c("cleardb", "Очистить БД"), c("clearmodule", "Очистить модуль"),
-                c("delalias", "Удалить алиас"), c("heroku", "Версия"), c("installation", "Инструкция"), c("setprefix", "Сменить префикс"),
+                c("delalias", "Удалить алиас"), c("MaxUB", "Версия"), c("installation", "Инструкция"), c("setprefix", "Сменить префикс"),
                 c("togglecmd", "Вкл/выкл команду"), c("togglemod", "Вкл/выкл модуль"), c("unblacklist", "Включить бота"), c("unblacklistuser", "Разрешить юзера"),
             ]),
             BotModule("Presets", "Сборки модулей", [
@@ -2066,6 +2080,36 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
             self.account_store.save(accounts)
         return web.json_response({"ok": ok})
 
+    async def acc_callback(self, request: web.Request) -> web.Response:
+        """Эндпоинт для имитации callback-запросов из Web UI."""
+        if not self._is_request_unlocked(request):
+            return web.json_response({"ok": False, "reason": "locked"}, status=403)
+        data = await request.post()
+        label = data.get("label", "main")
+        cb_data = data.get("data")
+        try:
+            chat_id = int(data.get("chat_id", 0))
+            message_id = int(data.get("message_id", 0))
+        except (ValueError, TypeError):
+            return web.json_response({"ok": False, "reason": "invalid IDs"}, status=400)
+
+        from core.multiaccount import multiaccount_manager
+        active = multiaccount_manager.get_account(label)
+        if not active:
+            return web.json_response({"ok": False, "reason": "account not connected"}, status=400)
+
+        from core.inline.types import InlineCall
+        call = InlineCall(
+            data=cb_data,
+            chat_id=chat_id,
+            message_id=message_id,
+            sender_id=0,
+            _client=active.client
+        )
+
+        await self.registry.dispatch_callback(call)
+        return web.json_response({"ok": True})
+
     async def update_config(self, request: web.Request) -> web.Response:
         data = await request.post()
         module = (data.get("module") or "").strip().lower()
@@ -2378,6 +2422,7 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
         app.router.add_post("/api/accounts/send_code", self.acc_send_code)
         app.router.add_post("/api/accounts/login", self.acc_login)
         app.router.add_post("/api/accounts/remove", self.acc_remove)
+        app.router.add_post("/api/accounts/callback", self.acc_callback)
         app.router.add_post("/api/config", self.update_config)
         self.runner = web.AppRunner(app)
         await self.runner.setup()

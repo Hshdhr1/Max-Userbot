@@ -10,192 +10,144 @@
 """
 
 import html
+from core import loader, utils
 
-from userbot import BotModule, ModuleCommand
+@loader.tds
+class MultiAccountModule(loader.Module):
+    """Управление несколькими аккаунтами"""
 
+    strings = {
+        "name": "MultiAccount",
+        "acc_added": "Аккаунт <b>{}</b> добавлен\nТеперь подключите его: <code>.connectacc {}</code>",
+        "acc_exists": "Ошибка: Аккаунт с такой меткой уже существует",
+        "acc_connected": "Аккаунт <b>{}</b> подключен и авторизован ✅",
+        "acc_pending": "Аккаунт <b>{}</b> подключен\nТребуется авторизация: <code>.sendcode {}</code>",
+        "acc_not_found": "Не удалось найти/подключить аккаунт <b>{}</b>",
+        "acc_disconnected": "Аккаунт <b>{}</b> отключен",
+        "acc_not_active": "Аккаунт <b>{}</b> не найден среди активных",
+        "sms_sent": "SMS код отправлен на номер аккаунта <b>{}</b>\nВведите код: <code>.loginacc {} &lt;code&gt;</code>",
+        "sms_fail": "Не удалось отправить SMS для аккаунта <b>{}</b>",
+        "login_success": "Аккаунт <b>{}</b> успешно авторизован ✅",
+        "login_fail": "Не удалось войти в аккаунт <b>{}</b>. Проверьте код.",
+        "acc_removed": "Аккаунт <b>{}</b> удален",
+        "list_header": "<b>Все аккаунты:</b>",
+        "list_item": "• {}: {}\n  Статус: {}, {}",
+        "no_accs": "Нет добавленных аккаунтов"
+    }
 
-def setup(registry):
-    """Регистрация модуля мультиаккаунтов."""
-    
-    registry.register_module(
-        BotModule(
-            name="MultiAccount",
-            description="Управление несколькими аккаунтами",
-            commands=[
-                ModuleCommand(
-                    name="addaccount",
-                    description="Добавить аккаунт .addaccount <label> <phone>",
-                    aliases=["добавитьакк"]
-                ),
-                ModuleCommand(
-                    name="connectacc",
-                    description="Подключить аккаунт .connectacc <label>",
-                    aliases=["подключитьакк"]
-                ),
-                ModuleCommand(
-                    name="disconnectacc",
-                    description="Отключить аккаунт .disconnectacc <label>",
-                    aliases=["отключитьакк"]
-                ),
-                ModuleCommand(
-                    name="listacc",
-                    description="Список всех аккаунтов",
-                    aliases=["списокакк"]
-                ),
-                ModuleCommand(
-                    name="sendcode",
-                    description="Отправить SMS код .sendcode <label>",
-                    aliases=["отправитькод"]
-                ),
-                ModuleCommand(
-                    name="loginacc",
-                    description="Войти по SMS .loginacc <label> <code>",
-                    aliases=["войтиакк"]
-                ),
-                ModuleCommand(
-                    name="removeacc",
-                    description="Удалить аккаунт .removeacc <label>",
-                    aliases=["удалитьакк"]
-                ),
-            ],
-            builtin=True,
-            version="1.0.0"
-        )
-    )
-    
-    # Регистрация динамических команд
-    registry.register_dynamic_command("addaccount", handle_add_account)
-    registry.register_dynamic_command("connectacc", handle_connect_account)
-    registry.register_dynamic_command("disconnectacc", handle_disconnect_account)
-    registry.register_dynamic_command("listacc", handle_list_accounts)
-    registry.register_dynamic_command("sendcode", handle_send_code)
-    registry.register_dynamic_command("loginacc", handle_login_account)
-    registry.register_dynamic_command("removeacc", handle_remove_account)
+    @loader.command(ru_doc="<label> <phone> - Добавить аккаунт")
+    async def addaccount(self, message):
+        from core.multiaccount import multiaccount_manager
+        args = utils.get_args(message)
+        if len(args) != 2:
+            await utils.answer(message, "Использование: .addaccount <label> <phone>")
+            return
 
+        label, phone = args
+        try:
+            multiaccount_manager.add_account(label, phone)
+            await utils.answer(message, self.strings["acc_added"].format(html.escape(label), html.escape(label)))
+        except ValueError:
+            await utils.answer(message, self.strings["acc_exists"])
 
-async def handle_add_account(ctx, chat_id: int, message_id: int, arg: str) -> str:
-    """Добавление аккаунта."""
-    from core.multiaccount import multiaccount_manager
-    
-    parts = arg.split(maxsplit=1)
-    if len(parts) != 2:
-        return "Использование: .addaccount <label> <phone>"
-    
-    label, phone = parts
-    
-    try:
-        multiaccount_manager.add_account(label, phone)
-        return f"Аккаунт {html.escape(label)} добавлен\nТеперь подключите его: .connectacc {html.escape(label)}"
-    except ValueError as e:
-        return f"Ошибка: {html.escape(str(e))}"
+    @loader.command(ru_doc="<label> - Подключить аккаунт")
+    async def connectacc(self, message):
+        from core.multiaccount import multiaccount_manager
+        label = utils.get_args_raw(message)
+        if not label:
+            await utils.answer(message, "Использование: .connectacc <label>")
+            return
 
+        active = await multiaccount_manager.connect_account(label)
+        if not active:
+            await utils.answer(message, self.strings["acc_not_found"].format(html.escape(label)))
+            return
 
-async def handle_connect_account(ctx, chat_id: int, message_id: int, arg: str) -> str:
-    """Подключение аккаунта."""
-    from core.multiaccount import multiaccount_manager
-    
-    label = arg.strip()
-    if not label:
-        return "Использование: .connectacc <label>"
-    
-    active = await multiaccount_manager.connect_account(label)
-    
-    if not active:
-        return f"Не удалось подключить аккаунт {html.escape(label)}"
-    
-    if active.authorized:
-        return f"Аккаунт {html.escape(label)} подключен и авторизован ✅"
-    else:
-        return f"Аккаунт {html.escape(label)} подключен\nТребуется авторизация: .sendcode {html.escape(label)}"
+        if active.authorized:
+            await utils.answer(message, self.strings["acc_connected"].format(html.escape(label)))
+        else:
+            await utils.answer(message, self.strings["acc_pending"].format(html.escape(label), html.escape(label)))
 
+    @loader.command(ru_doc="<label> - Отключить аккаунт")
+    async def disconnectacc(self, message):
+        from core.multiaccount import multiaccount_manager
+        label = utils.get_args_raw(message)
+        if not label:
+            await utils.answer(message, "Использование: .disconnectacc <label>")
+            return
 
-async def handle_disconnect_account(ctx, chat_id: int, message_id: int, arg: str) -> str:
-    """Отключение аккаунта."""
-    from core.multiaccount import multiaccount_manager
-    
-    label = arg.strip()
-    if not label:
-        return "Использование: .disconnectacc <label>"
-    
-    success = await multiaccount_manager.disconnect_account(label)
-    
-    if success:
-        return f"Аккаунт {html.escape(label)} отключен"
-    else:
-        return f"Аккаунт {html.escape(label)} не найден среди активных"
+        success = await multiaccount_manager.disconnect_account(label)
+        if success:
+            await utils.answer(message, self.strings["acc_disconnected"].format(html.escape(label)))
+        else:
+            await utils.answer(message, self.strings["acc_not_active"].format(html.escape(label)))
 
+    @loader.command(ru_doc="- Список всех аккаунтов")
+    async def listacc(self, message):
+        from core.multiaccount import multiaccount_manager
+        all_accounts = list(multiaccount_manager.accounts.values())
+        active_accounts = multiaccount_manager.get_all_accounts()
+        active_labels = {acc.label for acc in active_accounts}
 
-async def handle_list_accounts(ctx, chat_id: int, message_id: int, arg: str) -> str:
-    """Список аккаунтов."""
-    from core.multiaccount import multiaccount_manager
-    
-    all_accounts = list(multiaccount_manager.accounts.values())
-    active_accounts = multiaccount_manager.get_all_accounts()
-    active_labels = {acc.label for acc in active_accounts}
-    
-    if not all_accounts:
-        return "Нет добавленных аккаунтов"
-    
-    lines = ["<b>Все аккаунты:</b>"]
-    for acc in all_accounts:
-        status = "🟢 активен" if acc.label in active_labels else "🔴 отключен"
-        auth_status = "✅ авторизован" if acc.state == "authorized" else "⏳ ожидает входа"
-        lines.append(f"• {html.escape(acc.label)}: {html.escape(acc.phone)}")
-        lines.append(f"  Статус: {status}, {auth_status}")
-    
-    return "\n".join(lines)
+        if not all_accounts:
+            await utils.answer(message, self.strings["no_accs"])
+            return
 
+        lines = [self.strings["list_header"]]
+        for acc in all_accounts:
+            status = "🟢 активен" if acc.label in active_labels else "🔴 отключен"
+            auth_status = "✅ авторизован" if acc.state == "authorized" else "⏳ ожидает входа"
+            lines.append(self.strings["list_item"].format(
+                html.escape(acc.label), html.escape(acc.phone), status, auth_status
+            ))
 
-async def handle_send_code(ctx, chat_id: int, message_id: int, arg: str) -> str:
-    """Отправка SMS кода."""
-    from core.multiaccount import multiaccount_manager
-    
-    label = arg.strip()
-    if not label:
-        return "Использование: .sendcode <label>"
-    
-    sms_token = await multiaccount_manager.send_code(label)
-    
-    if sms_token:
-        return f"SMS код отправлен на номер аккаунта {html.escape(label)}\nВведите код: .loginacc {html.escape(label)} <code>"
-    else:
-        return f"Не удалось отправить SMS для аккаунта {html.escape(label)}"
+        await utils.answer(message, "\n".join(lines))
 
+    @loader.command(ru_doc="<label> - Отправить SMS код")
+    async def sendcode(self, message):
+        from core.multiaccount import multiaccount_manager
+        label = utils.get_args_raw(message)
+        if not label:
+            await utils.answer(message, "Использование: .sendcode <label>")
+            return
 
-async def handle_login_account(ctx, chat_id: int, message_id: int, arg: str) -> str:
-    """Вход по SMS коду."""
-    from core.multiaccount import multiaccount_manager
-    
-    parts = arg.split(maxsplit=1)
-    if len(parts) != 2:
-        return "Использование: .loginacc <label> <code>"
-    
-    label, code_str = parts
-    
-    try:
-        sms_code = int(code_str)
-    except ValueError:
-        return "Код должен быть числом"
-    
-    success = await multiaccount_manager.login_by_sms(label, sms_code)
-    
-    if success:
-        return f"Аккаунт {html.escape(label)} успешно авторизован ✅"
-    else:
-        return f"Не удалось войти в аккаунт {html.escape(label)}. Проверьте код."
+        sms_token = await multiaccount_manager.send_code(label)
+        if sms_token:
+            await utils.answer(message, self.strings["sms_sent"].format(html.escape(label), html.escape(label)))
+        else:
+            await utils.answer(message, self.strings["sms_fail"].format(html.escape(label)))
 
+    @loader.command(ru_doc="<label> <code> - Войти по SMS коду")
+    async def loginacc(self, message):
+        from core.multiaccount import multiaccount_manager
+        args = utils.get_args(message)
+        if len(args) != 2:
+            await utils.answer(message, "Использование: .loginacc <label> <code>")
+            return
 
-async def handle_remove_account(ctx, chat_id: int, message_id: int, arg: str) -> str:
-    """Удаление аккаунта."""
-    from core.multiaccount import multiaccount_manager
-    
-    label = arg.strip()
-    if not label:
-        return "Использование: .removeacc <label>"
-    
-    success = multiaccount_manager.remove_account(label)
-    
-    if success:
-        return f"Аккаунт {html.escape(label)} удален"
-    else:
-        return f"Аккаунт {html.escape(label)} не найден"
+        label, code_str = args
+        try:
+            sms_code = int(code_str)
+        except ValueError:
+            await utils.answer(message, "Код должен быть числом")
+            return
+
+        success = await multiaccount_manager.login_by_sms(label, sms_code)
+        if success:
+            await utils.answer(message, self.strings["login_success"].format(html.escape(label)))
+        else:
+            await utils.answer(message, self.strings["login_fail"].format(html.escape(label)))
+
+    @loader.command(ru_doc="<label> - Удалить аккаунт")
+    async def removeacc(self, message):
+        from core.multiaccount import multiaccount_manager
+        label = utils.get_args_raw(message)
+        if not label:
+            await utils.answer(message, "Использование: .removeacc <label>")
+            return
+
+        success = multiaccount_manager.remove_account(label)
+        if success:
+            await utils.answer(message, self.strings["acc_removed"].format(html.escape(label)))
+        else:
+            await utils.answer(message, self.strings["acc_not_active"].format(html.escape(label)))

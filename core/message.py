@@ -48,14 +48,40 @@ class MaxMessage:
         self.sender_id: Optional[int] = int(sender) if sender is not None else None
 
         self.is_outgoing: bool = bool(payload.get("outgoing") or message.get("outgoing"))
+        self.out: bool = self.is_outgoing  # Hikka alias
         self.is_edited: bool = bool(payload.get("edited") or message.get("edited"))
         self.raw: dict = self._packet
+
+        # Media properties (stubs/extracted from packet)
+        self.media = message.get("attaches") or message.get("attachments") or None
+        self.sticker = next((a for a in (self.media or []) if a.get("type") == "STICKER"), None)
+        self.photo = next((a for a in (self.media or []) if a.get("type") == "IMAGE"), None)
+        self.document = next((a for a in (self.media or []) if a.get("type") == "FILE"), None)
+        self.file = self.document
+
+    @property
+    def is_private(self) -> bool:
+        """Является ли чат личным сообщением."""
+        return self.chat_id > 0
 
     # ---- helpers -------------------------------------------------------------
 
     @property
     def client(self) -> Any:
         return self._client
+
+    async def get_sender(self) -> Any:
+        """Получить объект отправителя."""
+        if self.sender_id:
+            # В реальном приложении тут был бы запрос к API
+            return {"id": self.sender_id, "firstName": "User", "lastName": str(self.sender_id)}
+        return None
+
+    async def get_chat(self) -> Any:
+        """Получить объект чата."""
+        if self.chat_id:
+            return {"id": self.chat_id, "title": f"Chat {self.chat_id}"}
+        return None
 
     async def edit(self, text: str) -> None:
         """Отредактировать текущее сообщение (если возможно)."""
@@ -75,8 +101,12 @@ class MaxMessage:
             return
         await send_message(self._client, self.chat_id, text)
 
+    async def respond(self, text: str, **kwargs: Any) -> Any:
+        """Ответить на сообщение."""
+        return await self.reply(text)
+
     # `answer` — алиас для совместимости с Hikka utils.answer().
-    async def answer(self, text: str) -> None:
+    async def answer(self, text: str, **kwargs: Any) -> None:
         await self.edit(text)
 
 

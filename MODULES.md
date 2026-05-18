@@ -130,7 +130,7 @@ old   = self.pop("key", default)   # удаление
 
 ### `core.utils`
 
-Аналог `hikka/heroku.utils`:
+Аналог `hikka/MaxUB.utils`:
 
 - `utils.get_args_raw(message)` — всё, что после команды строкой.
 - `utils.get_args(message)` — то же, но `split()`.

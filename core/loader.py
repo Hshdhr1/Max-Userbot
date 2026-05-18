@@ -306,6 +306,37 @@ def tds(cls: type) -> type:
     return cls
 
 
+def callback_handler(**kwargs: Any) -> Callable:
+    """Декоратор для обработки callback-запросов (из Web UI или инлайна)."""
+
+    def decorator(func: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
+        func._is_callback_handler = True  # type: ignore[attr-defined]
+        func._callback_filters = kwargs  # type: ignore[attr-defined]
+        return func
+
+    return decorator
+
+
+class InlineManager:
+    """Менеджер инлайн-элементов (Hikka compatibility)."""
+
+    def __init__(self, client: Any = None, db: Any = None) -> None:
+        self._client = client
+        self._db = db
+
+    async def form(
+        self,
+        text: str,
+        message: Any = None,
+        reply_markup: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Отобразить форму (в Max просто редактирует сообщение)."""
+        if message and hasattr(message, "edit"):
+            return await message.edit(text)
+        return None
+
+
 class Module:
     """Базовый класс пользовательского модуля.
 
@@ -323,6 +354,15 @@ class Module:
     db: KeyValueDB | None = None
     client: Any = None
     config: ModuleConfig | None = None
+    inline: InlineManager = InlineManager()
+
+    @property
+    def _db(self) -> KeyValueDB | None:
+        return self.db
+
+    @property
+    def _client(self) -> Any:
+        return self.client
 
     # ------ удобные методы для модулей ---------------------------------------
 
@@ -383,11 +423,22 @@ def _build_bot_module(instance: Module) -> Any:
     if isinstance(instance.config, ModuleConfig):
         default_config = instance.config.defaults()
 
+    # Извлекаем версию из атрибута __version__ модуля или инстанса
+    version = getattr(instance, "__version__", None)
+    if version is None:
+        py_mod = inspect.getmodule(instance)
+        if py_mod:
+            version = getattr(py_mod, "__version__", None)
+
+    if isinstance(version, tuple):
+        version = ".".join(map(str, version))
+
     return BotModule(
         name=name,
         description=description,
         commands=commands,
         builtin=False,
+        version=str(version) if version else None,
         default_config=default_config,
     )
 
@@ -448,6 +499,12 @@ def register_instance(instance: Module, registry: Any) -> None:
 
         registry.register_watcher(watcher_callback)
 
+    # ---- callback handlers --------------------------------------------------
+    for _, member in inspect.getmembers(instance, predicate=inspect.iscoroutinefunction):
+        if not getattr(member, "_is_callback_handler", False):
+            continue
+        registry.register_callback_handler((instance, member))
+
 
 async def discover_and_register(py_module: Any, registry: Any, client: Any, db: KeyValueDB) -> list[Module]:
     """Сканирует импортированный python-модуль на классы `Module`,
@@ -464,6 +521,7 @@ async def discover_and_register(py_module: Any, registry: Any, client: Any, db: 
             continue
         instance.db = db
         instance.client = client
+        instance.inline = InlineManager(client, db)
         client_ready = getattr(instance, "client_ready", None)
         if callable(client_ready):
             try:
@@ -516,6 +574,7 @@ __all__ = [
     "ConfigValue",
     "Module",
     "ModuleConfig",
+    "callback_handler",
     "command",
     "discover_and_register",
     "dispatch_command",

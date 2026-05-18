@@ -1,2 +1,7 @@
 vkmax>=0.1.6
 aiohttp>=3.9.0
+markdown-it-py
+pillow
+pytz
+google-genai
+google-api-core
