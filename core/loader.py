@@ -1,4 +1,4 @@
-"""Hikka/Heroku-совместимая система модулей для Max-Userbot.
+"""Hikka/MaxUB-совместимая система модулей для Max-Userbot.
 
 Модули пишутся как:
 
@@ -295,7 +295,7 @@ def watcher(
 
 
 def unrestricted(func: Callable) -> Callable:
-    """No-op декоратор для совместимости с Heroku/Hikka."""
+    """No-op декоратор для совместимости с MaxUB/Hikka."""
     func._unrestricted = True  # type: ignore[attr-defined]
     return func
 

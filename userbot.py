@@ -327,22 +327,22 @@ class ModuleRegistry:
                 c("addrepo", "Добавить репозиторий"), c("clearmodules", "Выгрузить установленные"), c("delrepo", "Удалить репозиторий"),
                 c("dlmod", "Скачать модуль", ["dlm"]), c("loadmod", "Загрузить модуль", ["lm"]), c("ml", "Список модулей"), c("unloadmod", "Выгрузить модуль", ["ulm"]),
             ]),
-            BotModule("HerokuWeb", "Web/Inline mode add account", [c("addacc", "Добавить аккаунт"), c("weburl", "Открыть Web UI")], version="v2.0.0"),
-            BotModule("HerokuSettings", "Доп. настройки", [
+            BotModule("MaxUBWeb", "Web/Inline mode add account", [c("addacc", "Добавить аккаунт"), c("weburl", "Открыть Web UI")], version="v2.0.0"),
+            BotModule("MaxUBSettings", "Доп. настройки", [
                 c("enable_core_protection", "Enable protection"), c("nonickchat", "NoNick chat"), c("nonickchats", "Список NoNick чатов"),
                 c("nonickcmd", "NoNick cmd"), c("nonickcmds", "Список NoNick cmd"), c("nonickuser", "NoNick user"), c("nonickusers", "NoNick users"),
                 c("remove_core_protection", "Disable protection"), c("settings", "Показать настройки"), c("watcherbl", "Watcher blacklist"), c("watcher", "Watcher rules"), c("watchers", "Список watchers"),
             ]),
-            BotModule("HerokuSecurity", "Управление безопасностью", [
+            BotModule("MaxUBSecurity", "Управление безопасностью", [
                 c("delsgroup", "Удалить группу"), c("inlinesec", "Inline security"), c("newsgroup", "Создать группу"), c("owneradd", "Добавить owner"),
                 c("ownerlist", "Список owner"), c("ownerrm", "Удалить owner"), c("querysec", "Toggle query security"), c("security", "Правила"),
                 c("sgroup", "Инфо о группе"), c("sgroupadd", "Добавить в группу"), c("sgroupdel", "Удалить из группы"), c("sgroups", "Список групп"),
                 c("tsec", "Добавить targeted security"), c("tsecclr", "Очистить targeted security"), c("tsecrm", "Удалить targeted security"),
             ]),
-            BotModule("HerokuPluginSecurity", "Security for external modules", [c("external", "Ограничить модуль"), c("unexternal", "Разрешить модуль")]),
-            BotModule("HerokuInfo", "Show userbot info", [c("info", "Инфо о боте"), c("ubinfo", "Что такое userbot")]),
-            BotModule("HerokuConfig", "Интерактивный конфигуратор", [c("config", "Настроить модуль", ["cfg"]), c("fconfig", "Быстрый конфиг", ["fcfg"])]),
-            BotModule("HerokuBackup", "Резервные копии", [c("backupall", "Общий бэкап"), c("backupdb", "Бэкап БД"), c("backupmods", "Бэкап модов"), c("restoreall", "Восстановить всё"), c("restoredb", "Восстановить БД"), c("restoremods", "Восстановить моды"), c("set_backup_period", "Период")]),
+            BotModule("MaxUBPluginSecurity", "Security for external modules", [c("external", "Ограничить модуль"), c("unexternal", "Разрешить модуль")]),
+            BotModule("MaxUBInfo", "Show userbot info", [c("info", "Инфо о боте"), c("ubinfo", "Что такое userbot")]),
+            BotModule("MaxUBConfig", "Интерактивный конфигуратор", [c("config", "Настроить модуль", ["cfg"]), c("fconfig", "Быстрый конфиг", ["fcfg"])]),
+            BotModule("MaxUBBackup", "Резервные копии", [c("backupall", "Общий бэкап"), c("backupdb", "Бэкап БД"), c("backupmods", "Бэкап модов"), c("restoreall", "Восстановить всё"), c("restoredb", "Восстановить БД"), c("restoremods", "Восстановить моды"), c("set_backup_period", "Период")]),
             BotModule("Help", "Помощь", [c("help", "Справка"), c("helphide", "Скрыть модуль"), c("support", "Чат поддержки")]),
             BotModule("Evaluator", "Выполняет код", [c("e", "Python eval", ["eval"]), c("ec", "C"), c("ecpp", "C++"), c("enode", "Node.js")]),
             BotModule("APILimiter", "API flood protection", [c("api_fw_protection", "Вкл/выкл защиту"), c("suspend_api_protect", "Пауза защиты")]),
@@ -846,6 +846,7 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
 .md3-list__title { font: var(--md-sys-typescale-title); font-size: 15px; }
 .md3-list__support { color: var(--md-sys-color-on-surface-variant); font-size: 13px; }
 .md3-list__empty { padding: 16px; text-align: center; }
+.md3-list__actions { display: flex; gap: 4px; margin-left: 12px; }
 
 /* ---- badge ------------------------------------------------------------- */
 .md3-badge {
@@ -1128,20 +1129,40 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
             for m in modules
         )
 
-        accounts = self.account_store.load()
-        if accounts:
-            accounts_html = "".join(
-                "<li class='md3-list__row'>"
-                "<span class='md3-list__avatar material-symbols-outlined'>account_circle</span>"
-                "<div class='md3-list__primary'>"
-                f"<div class='md3-list__title'>{html.escape(a.label)}</div>"
-                f"<div class='md3-list__support'>{html.escape(a.phone)}</div>"
-                "</div>"
-                f"<span class='md3-badge md3-badge--{ 'builtin' if a.state == 'authorized' else 'external'}'>"
-                f"{html.escape(a.state)}</span>"
-                "</li>"
-                for a in accounts
-            )
+        from core.multiaccount import multiaccount_manager
+        all_accounts = multiaccount_manager.accounts.values()
+        if all_accounts:
+            accounts_html = ""
+            for a in all_accounts:
+                active = multiaccount_manager.get_account(a.label)
+                is_connected = active is not None
+                is_authorized = a.state == "authorized"
+
+                status_badge = f"<span class='md3-badge md3-badge--{'builtin' if is_authorized else 'error' if a.state == 'error' else 'external'}'>{html.escape(a.state)}</span>"
+                conn_badge = f"<span class='md3-badge md3-badge--{'builtin' if is_connected else 'available'}'>{'Connected' if is_connected else 'Disconnected'}</span>"
+
+                actions = ""
+                if not is_connected:
+                    actions += f"<button class='md3-btn md3-btn--tonal acc-action' data-action='connect' data-label='{html.escape(a.label)}'><span class='material-symbols-outlined'>link</span>Connect</button>"
+                else:
+                    actions += f"<button class='md3-btn md3-btn--outlined acc-action' data-action='disconnect' data-label='{html.escape(a.label)}'><span class='material-symbols-outlined'>link_off</span>Disconnect</button>"
+                    if not is_authorized:
+                        actions += f"<button class='md3-btn md3-btn--filled acc-action' data-action='send_code' data-label='{html.escape(a.label)}'><span class='material-symbols-outlined'>sms</span>Send Code</button>"
+                        actions += f"<button class='md3-btn md3-btn--filled acc-action' data-action='login' data-label='{html.escape(a.label)}'><span class='material-symbols-outlined'>key</span>Enter Code</button>"
+
+                actions += f"<button class='md3-btn md3-btn--text acc-action' data-action='remove' data-label='{html.escape(a.label)}'><span class='material-symbols-outlined'>delete</span></button>"
+
+                accounts_html += (
+                    "<li class='md3-list__row'>"
+                    "<span class='md3-list__avatar material-symbols-outlined'>account_circle</span>"
+                    "<div class='md3-list__primary'>"
+                    f"<div class='md3-list__title'>{html.escape(a.label)} {conn_badge}</div>"
+                    f"<div class='md3-list__support'>{html.escape(a.phone)}</div>"
+                    "</div>"
+                    f"{status_badge}"
+                    f"<div class='md3-list__actions'>{actions}</div>"
+                    "</li>"
+                )
         else:
             accounts_html = "<li class='md3-empty md3-list__empty'>Нет подключённых аккаунтов.</li>"
 
@@ -1180,7 +1201,7 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
   </div>
   <div class='md3-app-bar__stats'>
     <span class='md3-stat'><b>{len(modules)}</b><small>модулей</small></span>
-    <span class='md3-stat'><b>{len(accounts)}</b><small>аккаунтов</small></span>
+    <span class='md3-stat'><b>{len(all_accounts)}</b><small>аккаунтов</small></span>
     <span class='md3-stat'><b>{uptime}s</b><small>uptime</small></span>
   </div>
   <div class='md3-app-bar__actions'>
@@ -1195,6 +1216,23 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
     </a>
   </div>
 </header>
+
+<div class='md3-modal' id='md3-sms-modal' hidden>
+  <div class='md3-modal__scrim' data-close='1'></div>
+  <div class='md3-modal__sheet' role='dialog' aria-modal='true' aria-labelledby='md3-sms-title'>
+    <h3 id='md3-sms-title'>Введите SMS код</h3>
+    <p class='md3-modal__desc'>Код подтверждения для аккаунта <b id='md3-sms-label'></b></p>
+    <div class='md3-textfield'>
+      <input id='md3-sms-code' type='text' placeholder=' ' autocomplete='one-time-code'>
+      <label for='md3-sms-code'>Код из SMS</label>
+    </div>
+    <div class='md3-modal__error' id='md3-sms-error' hidden></div>
+    <div class='md3-modal__actions'>
+      <button class='md3-btn md3-btn--text' data-close='1'>Отмена</button>
+      <button class='md3-btn md3-btn--filled' id='md3-sms-submit'>Войти</button>
+    </div>
+  </div>
+</div>
 
 <div class='md3-modal' id='md3-unlock-modal' hidden>
   <div class='md3-modal__scrim' data-close='1'></div>
@@ -1853,6 +1891,83 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
   fetchAuth();
   loadCatalog();
   loadThreats();
+
+  // ---- accounts management ----
+  const smsModal = document.getElementById('md3-sms-modal');
+  const smsSubmit = document.getElementById('md3-sms-submit');
+  const smsInput = document.getElementById('md3-sms-code');
+  const smsError = document.getElementById('md3-sms-error');
+  const smsLabelText = document.getElementById('md3-sms-label');
+  let currentSmsLabel = '';
+
+  const handleAccAction = async (btn) => {{
+    const action = btn.dataset.action;
+    const label = btn.dataset.label;
+
+    if (action === 'login') {{
+      currentSmsLabel = label;
+      smsLabelText.textContent = label;
+      smsError.hidden = true;
+      smsInput.value = '';
+      smsModal.hidden = false;
+      return;
+    }}
+
+    if (action === 'remove' && !confirm(`Удалить аккаунт "${{label}}"?`)) return;
+
+    btn.disabled = true;
+    try {{
+      const fd = new FormData();
+      fd.append('label', label);
+      const r = await fetch(`/api/accounts/${{action}}`, {{ method: 'POST', body: fd, credentials: 'same-origin' }});
+      if (r.status === 403) {{
+        openModal(() => handleAccAction(btn), `Требуется unlock для действия "${{action}}" над аккаунтом ${{label}}.`);
+        return;
+      }}
+      if (r.ok) {{
+        location.reload();
+      }} else {{
+        const data = await r.json().catch(() => ({{}}));
+        alert(`Ошибка: ${{data.reason || r.status}}`);
+      }}
+    }} catch (e) {{
+      alert(`Ошибка сети: ${{e.message}}`);
+    }} finally {{
+      btn.disabled = false;
+    }}
+  }};
+
+  document.querySelectorAll('.acc-action').forEach(btn => {{
+    btn.addEventListener('click', () => handleAccAction(btn));
+  }});
+
+  smsSubmit.addEventListener('click', async () => {{
+    const code = smsInput.value.trim();
+    if (!code) return;
+    smsSubmit.disabled = true;
+    try {{
+      const fd = new FormData();
+      fd.append('label', currentSmsLabel);
+      fd.append('code', code);
+      const r = await fetch('/api/accounts/login', {{ method: 'POST', body: fd, credentials: 'same-origin' }});
+      const data = await r.json().catch(() => ({{}}));
+      if (r.ok && data.ok) {{
+        location.reload();
+      }} else {{
+        smsError.textContent = data.reason || 'Ошибка входа';
+        smsError.hidden = false;
+      }}
+    }} catch (e) {{
+      smsError.textContent = `Ошибка: ${{e.message}}`;
+      smsError.hidden = false;
+    }} finally {{
+      smsSubmit.disabled = false;
+    }}
+  }});
+
+  smsModal.addEventListener('click', (e) => {{
+    if (e.target.dataset && e.target.dataset.close === '1') smsModal.hidden = true;
+  }});
 }})();
 </script>
 </body>
@@ -1868,17 +1983,88 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
         phone = (data.get("phone") or "").strip()
         if not label or not phone:
             return web.Response(status=400, text="label and phone are required")
-        self.account_store.add_or_update(AccountEntry(label=label, phone=phone, state="pending_auth"))
-        # Также синхронизируем с MultiAccountManager, если он используется в текущем процессе.
+
         try:
-            from core.multiaccount import multiaccount_manager  # local import to avoid cycle on bare imports
-            if label not in multiaccount_manager.accounts:
-                from core.multiaccount import AccountEntry as MultiAccountEntry
-                multiaccount_manager.accounts[label] = MultiAccountEntry(label=label, phone=phone)
-                multiaccount_manager._save_accounts()
-        except Exception:  # noqa: BLE001 - синхронизация опциональна
-            logger.debug("MultiAccountManager недоступен для синхронизации", exc_info=True)
+            from core.multiaccount import multiaccount_manager
+            multiaccount_manager.add_account(label, phone)
+            self.account_store.add_or_update(AccountEntry(label=label, phone=phone, state="pending_auth"))
+        except Exception as exc:
+            return web.Response(status=400, text=str(exc))
+
         raise web.HTTPFound("/?saved=account")
+
+    async def acc_connect(self, request: web.Request) -> web.Response:
+        if not self._is_request_unlocked(request):
+            return web.json_response({"ok": False, "reason": "locked"}, status=403)
+        data = await request.post()
+        label = data.get("label")
+        if not label:
+            return web.json_response({"ok": False, "reason": "label required"}, status=400)
+        from core.multiaccount import multiaccount_manager
+        active = await multiaccount_manager.connect_account(label)
+        return web.json_response({"ok": active is not None, "authorized": getattr(active, "authorized", False)})
+
+    async def acc_disconnect(self, request: web.Request) -> web.Response:
+        if not self._is_request_unlocked(request):
+            return web.json_response({"ok": False, "reason": "locked"}, status=403)
+        data = await request.post()
+        label = data.get("label")
+        if not label:
+            return web.json_response({"ok": False, "reason": "label required"}, status=400)
+        from core.multiaccount import multiaccount_manager
+        ok = await multiaccount_manager.disconnect_account(label)
+        return web.json_response({"ok": ok})
+
+    async def acc_send_code(self, request: web.Request) -> web.Response:
+        if not self._is_request_unlocked(request):
+            return web.json_response({"ok": False, "reason": "locked"}, status=403)
+        data = await request.post()
+        label = data.get("label")
+        if not label:
+            return web.json_response({"ok": False, "reason": "label required"}, status=400)
+        from core.multiaccount import multiaccount_manager
+        token = await multiaccount_manager.send_code(label)
+        return web.json_response({"ok": token is not None})
+
+    async def acc_login(self, request: web.Request) -> web.Response:
+        if not self._is_request_unlocked(request):
+            return web.json_response({"ok": False, "reason": "locked"}, status=403)
+        data = await request.post()
+        label = data.get("label")
+        code = data.get("code")
+        if not label or not code:
+            return web.json_response({"ok": False, "reason": "label and code required"}, status=400)
+        try:
+            sms_code = int(code)
+        except ValueError:
+            return web.json_response({"ok": False, "reason": "invalid code format"}, status=400)
+        from core.multiaccount import multiaccount_manager
+        ok = await multiaccount_manager.login_by_sms(label, sms_code)
+        if ok:
+            # Sync back to account_store
+            acc = multiaccount_manager.accounts.get(label)
+            if acc:
+                self.account_store.add_or_update(AccountEntry(
+                    label=acc.label, phone=acc.phone, state=acc.state,
+                    device_id=acc.device_id, token=acc.token
+                ))
+        return web.json_response({"ok": ok})
+
+    async def acc_remove(self, request: web.Request) -> web.Response:
+        if not self._is_request_unlocked(request):
+            return web.json_response({"ok": False, "reason": "locked"}, status=403)
+        data = await request.post()
+        label = data.get("label")
+        if not label:
+            return web.json_response({"ok": False, "reason": "label required"}, status=400)
+        from core.multiaccount import multiaccount_manager
+        ok = multiaccount_manager.remove_account(label)
+        if ok:
+            # Also remove from legacy store
+            accounts = self.account_store.load()
+            accounts = [a for a in accounts if a.label != label]
+            self.account_store.save(accounts)
+        return web.json_response({"ok": ok})
 
     async def update_config(self, request: web.Request) -> web.Response:
         data = await request.post()
@@ -2187,6 +2373,11 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
         app.router.add_get("/api/threats", self.threats_endpoint)
         app.router.add_post("/api/threats/remove", self.threat_remove)
         app.router.add_post("/api/accounts", self.add_account)
+        app.router.add_post("/api/accounts/connect", self.acc_connect)
+        app.router.add_post("/api/accounts/disconnect", self.acc_disconnect)
+        app.router.add_post("/api/accounts/send_code", self.acc_send_code)
+        app.router.add_post("/api/accounts/login", self.acc_login)
+        app.router.add_post("/api/accounts/remove", self.acc_remove)
         app.router.add_post("/api/config", self.update_config)
         self.runner = web.AppRunner(app)
         await self.runner.setup()
@@ -2259,25 +2450,6 @@ def resolve_destination_chat(payload: dict, source_chat_id: int) -> int:
     return int(payload.get("chatId", source_chat_id))
 
 
-async def try_login(client: MaxClient) -> None:
-    if SESSION_FILE.exists():
-        raw = SESSION_FILE.read_text(encoding="utf-8").strip()
-        if "\n" in raw:
-            device_id, token = raw.split("\n", maxsplit=1)
-            try:
-                await client.login_by_token(token, device_id)
-                logger.info("Login by token successful")
-                return
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Token login failed: %s", exc)
-
-    phone = os.getenv("MAX_PHONE") or input("Enter phone number (+79990000000): ").strip()
-    sms_token = await client.send_code(phone)
-    sms_code = int(os.getenv("MAX_SMS_CODE") or input("Enter SMS code: ").strip())
-    account_data = await client.sign_in(sms_token, sms_code)
-    token = account_data["payload"]["tokenAttrs"]["LOGIN"]["token"]
-    SESSION_FILE.write_text(f"{client.device_id}\n{token}", encoding="utf-8")
-    account_store.add_or_update(AccountEntry(label="main", phone=phone, state="authorized", device_id=client.device_id, token=token))
 
 
 _TG_UNLOCKED: dict[str, float] = {}
@@ -2747,9 +2919,10 @@ async def on_packet(client: MaxClient, packet: dict) -> None:
     if not text.startswith(prefix):
         return
 
-    chat_id = payload.get("chatId")
-    message_id = message.get("id")
-    if chat_id is None or message_id is None:
+    try:
+        chat_id = int(payload.get("chatId"))
+        message_id = int(message.get("id"))
+    except (ValueError, TypeError):
         return
 
     body = text[len(prefix):].strip()
@@ -2760,18 +2933,21 @@ async def on_packet(client: MaxClient, packet: dict) -> None:
     arg = rest[0] if rest else ""
 
     try:
-        handled = await process_builtin(client, packet, int(chat_id), int(message_id), cmd.lower(), arg)
+        handled = await process_builtin(client, packet, chat_id, message_id, cmd.lower(), arg)
         stats.commands_handled += 1
         stats.last_command_ts = time.time()
         # Только имя команды (без аргументов) — для top_commands в telemetry.
         telemetry_counters.record(cmd.lower())
         if not handled:
-            await edit_message(client, int(chat_id), int(message_id), f"Неизвестная команда: <code>{html.escape(cmd)}</code>")
+            await edit_message(client, chat_id, message_id, f"Неизвестная команда: <code>{html.escape(cmd)}</code>")
     except Exception as exc:  # noqa: BLE001
         stats.last_error_ts = time.time()
         stats.last_error_msg = f"{type(exc).__name__}: {exc}"
         logger.exception("Command processing failed")
-        await edit_message(client, int(chat_id), int(message_id), f"Ошибка: <code>{html.escape(type(exc).__name__)}: {html.escape(str(exc))}</code>")
+        try:
+            await edit_message(client, chat_id, message_id, f"Ошибка: <code>{html.escape(type(exc).__name__)}: {html.escape(str(exc))}</code>")
+        except Exception:
+            pass
 
 
 async def telemetry_loop(interval: int = 3600) -> None:
@@ -2809,25 +2985,3 @@ async def telemetry_loop(interval: int = 3600) -> None:
         await asyncio.sleep(interval)
 
 
-async def main() -> None:
-    MODULES_DIR.mkdir(exist_ok=True)
-
-    client = MaxClient()
-    await client.connect()
-    await try_login(client)
-    await client.set_callback(on_packet)
-
-    # Background telemetry; полностью no-op пока юзер не включил opt-in.
-    telemetry_task = asyncio.create_task(telemetry_loop())
-
-    logger.info("MAX Userbot started")
-    try:
-        await asyncio.Future()
-    finally:
-        telemetry_task.cancel()
-        await webui.stop()
-        await weather_client.close()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
