@@ -41,6 +41,7 @@ class ActiveAccount:
     client: MaxClient
     api: MaxApiExtensions
     authorized: bool = False
+    sms_token: str = ""
     callback: Callable | None = None
 
 
