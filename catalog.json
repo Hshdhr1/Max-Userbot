@@ -28,6 +28,24 @@
       "filename": "site_dump.py",
       "url": "https://raw.githubusercontent.com/Hshdhr1/Max-Userbot/main/modules/examples/site_dump.py",
       "tags": ["pdf", "render", "tools"]
+    },
+    {
+      "name": "SystemInfo",
+      "description": "Показывает информацию о системе (ОС, ЦП, ОЗУ, время). Команды: .sysinfo, .ping.",
+      "version": "1.0",
+      "author": "Max-Userbot",
+      "filename": "sysinfo.py",
+      "url": "https://raw.githubusercontent.com/Hshdhr1/Max-Userbot/main/modules/examples/sysinfo.py",
+      "tags": ["system", "tools"]
+    },
+    {
+      "name": "Notes",
+      "description": "Модуль для создания и управления текстовыми заметками. Команды: .save, .get, .notes, .delnote.",
+      "version": "1.0",
+      "author": "Max-Userbot",
+      "filename": "notes.py",
+      "url": "https://raw.githubusercontent.com/Hshdhr1/Max-Userbot/main/modules/examples/notes.py",
+      "tags": ["tools", "notes"]
     }
   ]
 }
