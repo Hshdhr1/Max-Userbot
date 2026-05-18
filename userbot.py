@@ -32,6 +32,7 @@ from core.security import (
     verify_password,
 )
 from core import telemetry as telemetry_mod
+from core.multiaccount import multiaccount_manager
 
 LOG_FORMAT = "[%(asctime)s] [%(levelname)s] %(name)s: %(message)s"
 DATE_FORMAT = "%d.%m.%Y %H:%M:%S"
@@ -135,15 +136,6 @@ class UserbotConfig:
     telemetry_anon_id: str = ""
 
 
-@dataclass
-class AccountEntry:
-    label: str
-    phone: str
-    state: str = "pending_auth"
-    device_id: str = ""
-    token: str = ""
-
-
 # ------------------------------- persistence ---------------------------------
 class ConfigStore:
     def __init__(self, path: Path) -> None:
@@ -171,46 +163,6 @@ class ConfigStore:
 
     def save(self) -> None:
         self.path.write_text(json.dumps(asdict(self.data), ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-class AccountStore:
-    def __init__(self, path: Path) -> None:
-        self.path = path
-
-    def load(self) -> list[AccountEntry]:
-        if not self.path.exists():
-            return []
-        try:
-            rows = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            logger.warning("Accounts file is unreadable, treating as empty: %s", exc)
-            return []
-        if not isinstance(rows, list):
-            logger.warning("Accounts file is not a list, treating as empty")
-            return []
-        known = {f.name for f in fields(AccountEntry)}
-        result: list[AccountEntry] = []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            try:
-                result.append(AccountEntry(**{k: v for k, v in row.items() if k in known}))
-            except TypeError as exc:
-                logger.warning("Skipping invalid account row: %s", exc)
-        return result
-
-    def save(self, accounts: list[AccountEntry]) -> None:
-        self.path.write_text(json.dumps([asdict(a) for a in accounts], ensure_ascii=False, indent=2), encoding="utf-8")
-
-    def add_or_update(self, item: AccountEntry) -> None:
-        accounts = self.load()
-        for i, acc in enumerate(accounts):
-            if acc.label.lower() == item.label.lower():
-                accounts[i] = item
-                self.save(accounts)
-                return
-        accounts.append(item)
-        self.save(accounts)
 
 
 # ------------------------------ api extensions -------------------------------
@@ -437,10 +389,9 @@ class ModuleRegistry:
 
 # --------------------------------- web ui ------------------------------------
 class WebUIManager:
-    def __init__(self, registry: ModuleRegistry, config_store: ConfigStore, account_store: AccountStore):
+    def __init__(self, registry: ModuleRegistry, config_store: ConfigStore):
         self.registry = registry
         self.config_store = config_store
-        self.account_store = account_store
         self.runner: web.AppRunner | None = None
         self.site: web.TCPSite | None = None
         self.host = os.getenv("MAX_WEBUI_HOST", "127.0.0.1")
@@ -1143,8 +1094,7 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
             for m in modules
         )
 
-        from core.multiaccount import multiaccount_manager
-        all_accounts = multiaccount_manager.accounts.values()
+        all_accounts = list(multiaccount_manager.accounts.values())
         if all_accounts:
             accounts_html = ""
             for a in all_accounts:
@@ -1939,7 +1889,16 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
         return;
       }}
       if (r.ok) {{
-        location.reload();
+        if (action === 'send_code') {{
+          showSnack("Код подтверждения отправлен!");
+          currentSmsLabel = label;
+          smsLabelText.textContent = label;
+          smsError.hidden = true;
+          smsInput.value = '';
+          smsModal.hidden = false;
+        }} else {{
+          location.reload();
+        }}
       }} else {{
         const data = await r.json().catch(() => ({{}}));
         alert(`Ошибка: ${{data.reason || r.status}}`);
@@ -1999,9 +1958,7 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
             return web.Response(status=400, text="label and phone are required")
 
         try:
-            from core.multiaccount import multiaccount_manager
             multiaccount_manager.add_account(label, phone)
-            self.account_store.add_or_update(AccountEntry(label=label, phone=phone, state="pending_auth"))
         except Exception as exc:
             return web.Response(status=400, text=str(exc))
 
@@ -2014,7 +1971,6 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
         label = data.get("label")
         if not label:
             return web.json_response({"ok": False, "reason": "label required"}, status=400)
-        from core.multiaccount import multiaccount_manager
         active = await multiaccount_manager.connect_account(label)
         return web.json_response({"ok": active is not None, "authorized": getattr(active, "authorized", False)})
 
@@ -2025,7 +1981,6 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
         label = data.get("label")
         if not label:
             return web.json_response({"ok": False, "reason": "label required"}, status=400)
-        from core.multiaccount import multiaccount_manager
         ok = await multiaccount_manager.disconnect_account(label)
         return web.json_response({"ok": ok})
 
@@ -2036,7 +1991,6 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
         label = data.get("label")
         if not label:
             return web.json_response({"ok": False, "reason": "label required"}, status=400)
-        from core.multiaccount import multiaccount_manager
         token = await multiaccount_manager.send_code(label)
         return web.json_response({"ok": token is not None})
 
@@ -2052,16 +2006,7 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
             sms_code = int(code)
         except ValueError:
             return web.json_response({"ok": False, "reason": "invalid code format"}, status=400)
-        from core.multiaccount import multiaccount_manager
         ok = await multiaccount_manager.login_by_sms(label, sms_code)
-        if ok:
-            # Sync back to account_store
-            acc = multiaccount_manager.accounts.get(label)
-            if acc:
-                self.account_store.add_or_update(AccountEntry(
-                    label=acc.label, phone=acc.phone, state=acc.state,
-                    device_id=acc.device_id, token=acc.token
-                ))
         return web.json_response({"ok": ok})
 
     async def acc_remove(self, request: web.Request) -> web.Response:
@@ -2071,13 +2016,7 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
         label = data.get("label")
         if not label:
             return web.json_response({"ok": False, "reason": "label required"}, status=400)
-        from core.multiaccount import multiaccount_manager
         ok = multiaccount_manager.remove_account(label)
-        if ok:
-            # Also remove from legacy store
-            accounts = self.account_store.load()
-            accounts = [a for a in accounts if a.label != label]
-            self.account_store.save(accounts)
         return web.json_response({"ok": ok})
 
     async def acc_callback(self, request: web.Request) -> web.Response:
@@ -2093,7 +2032,6 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
         except (ValueError, TypeError):
             return web.json_response({"ok": False, "reason": "invalid IDs"}, status=400)
 
-        from core.multiaccount import multiaccount_manager
         active = multiaccount_manager.get_account(label)
         if not active:
             return web.json_response({"ok": False, "reason": "account not connected"}, status=400)
@@ -2122,23 +2060,21 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
         raise web.HTTPFound("/?saved=config")
 
     async def health(self, _: web.Request) -> web.Response:
-        accounts = self.account_store.load()
         body = {
             "status": "ok",
             "uptime_seconds": int(time.time()) - START_TS,
             "modules": len(self.registry.available_modules),
-            "accounts": len(accounts),
+            "accounts": len(multiaccount_manager.accounts),
         }
         return web.json_response(body)
 
     async def stats_endpoint(self, _: web.Request) -> web.Response:
-        accounts = self.account_store.load()
         commands = sum(len(m.commands) for m in self.registry.available_modules)
         body = {
             "uptime_seconds": int(time.time()) - START_TS,
             "modules": len(self.registry.available_modules),
-            "accounts": len(accounts),
-            "accounts_authorized": sum(1 for a in accounts if a.state == "authorized"),
+            "accounts": len(multiaccount_manager.accounts),
+            "accounts_authorized": sum(1 for a in multiaccount_manager.accounts.values() if a.state == "authorized"),
             "commands": commands,
             "watchers": len(self.registry.packet_watchers),
             "class_commands": len(self.registry.class_commands),
@@ -2269,9 +2205,6 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
 
     async def telemetry_status(self, _: web.Request) -> web.Response:
         cfg = self.config_store.data
-        # Load один раз — двойной .load() читает JSON-файл дважды и может
-        # дать рассинхрон если файл поменялся между чтениями.
-        accounts = self.account_store.load()
         return web.json_response({
             "enabled": bool(cfg.telemetry_enabled),
             "endpoint": cfg.telemetry_endpoint or "",
@@ -2283,8 +2216,8 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
                 modules_count=len(self.registry.modules),
                 commands_count=sum(len(m.commands) for m in self.registry.modules.values()),
                 watchers_count=len(self.registry.packet_watchers),
-                accounts_total=len(accounts),
-                accounts_authorized=sum(1 for a in accounts if a.state == "authorized"),
+                accounts_total=len(multiaccount_manager.accounts),
+                accounts_authorized=sum(1 for a in multiaccount_manager.accounts.values() if a.state == "authorized"),
                 packets_in=stats.packets_in,
                 packets_out=stats.packets_out,
                 commands_processed=stats.commands_handled,
@@ -2440,10 +2373,9 @@ code, .md3-mono { font-family: 'Roboto Mono', ui-monospace, 'Consolas', monospac
 # -------------------------------- globals ------------------------------------
 config_store = ConfigStore(CONFIG_FILE)
 config_store.load()
-account_store = AccountStore(ACCOUNTS_FILE)
 module_registry = ModuleRegistry()
 module_registry.preload_default_modules()
-webui = WebUIManager(module_registry, config_store, account_store)
+webui = WebUIManager(module_registry, config_store)
 weather_client = WeatherClient()
 
 
@@ -2492,7 +2424,10 @@ def resolve_destination_chat(payload: dict, source_chat_id: int) -> int:
     """Guard against accidental random destination changes while processing."""
     if config_store.data.random_reroute_guard:
         return source_chat_id
-    return int(payload.get("chatId", source_chat_id))
+    try:
+        return int(payload.get("chatId", source_chat_id))
+    except (ValueError, TypeError):
+        return source_chat_id
 
 
 
@@ -2752,7 +2687,6 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
                 f"Endpoint: <code>{html.escape(cfg.telemetry_endpoint or '(пусто)')}</code>")
             return True
         if sub == "preview":
-            accounts = account_store.load()
             payload = telemetry_mod.build_payload(
                 anon_id=cfg.telemetry_anon_id or "(not generated yet)",
                 version=os.getenv("MAX_VERSION", "max-userbot/dev"),
@@ -2760,8 +2694,8 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
                 modules_count=len(module_registry.modules),
                 commands_count=sum(len(m.commands) for m in module_registry.modules.values()),
                 watchers_count=len(module_registry.packet_watchers),
-                accounts_total=len(accounts),
-                accounts_authorized=sum(1 for a in accounts if a.state == "authorized"),
+                accounts_total=len(multiaccount_manager.accounts),
+                accounts_authorized=sum(1 for a in multiaccount_manager.accounts.values() if a.state == "authorized"),
                 packets_in=stats.packets_in,
                 packets_out=stats.packets_out,
                 commands_processed=stats.commands_handled,
@@ -2801,11 +2735,11 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
         return True
 
     if cmd == "accounts":
-        accounts = account_store.load()
-        if not accounts:
+        all_accounts = multiaccount_manager.accounts.values()
+        if not all_accounts:
             await edit_message(client, destination_chat, message_id, "Нет аккаунтов")
             return True
-        lines = [f"• {a.label}: {a.phone} ({a.state})" for a in accounts]
+        lines = [f"• {a.label}: {a.phone} ({a.state})" for a in all_accounts]
         await edit_message(client, destination_chat, message_id, to_html("\n".join(lines)))
         return True
 
@@ -2844,9 +2778,12 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
         if not arg:
             await edit_message(client, destination_chat, message_id, "Использование: .setfav <chat_id>")
             return True
-        config_store.data.favorites_chat_id = int(arg)
-        config_store.save()
-        await edit_message(client, destination_chat, message_id, "Чат избранного сохранён")
+        try:
+            config_store.data.favorites_chat_id = int(arg)
+            config_store.save()
+            await edit_message(client, destination_chat, message_id, "Чат избранного сохранён")
+        except ValueError:
+            await edit_message(client, destination_chat, message_id, "chat_id должен быть числом")
         return True
 
     if cmd == "favsay":
@@ -2927,6 +2864,16 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
         await edit_message(client, destination_chat, message_id, f"Отправлено в chat_id={chosen}")
         return True
 
+    if cmd == "maxub":
+        await edit_message(
+            client,
+            destination_chat,
+            message_id,
+            f"🪐 <b>Max Userbot</b> v{__version__}\n"
+            "База для автоматизации и расширения возможностей MAX.",
+        )
+        return True
+
     # Сначала пробуем class-based (Hikka-style) команды.
     klass = module_registry.class_commands.get(cmd)
     if klass:
@@ -2948,6 +2895,18 @@ async def process_builtin(client: MaxClient, packet: dict, chat_id: int, message
 
 async def on_packet(client: MaxClient, packet: dict) -> None:
     stats.packets_in += 1
+
+    # Передаём пакет в менеджер звонков
+    from core.client_manager import call_manager
+    # Пытаемся определить метку аккаунта для пакета
+    from core.multiaccount import multiaccount_manager
+    label = "main"
+    for active in multiaccount_manager.get_all_accounts():
+        if active.client == client:
+            label = active.label
+            break
+    await call_manager.handle_packet(label, packet)
+
     for watcher in module_registry.packet_watchers:
         try:
             await watcher(client, packet)
@@ -3006,7 +2965,6 @@ async def telemetry_loop(interval: int = 3600) -> None:
         try:
             cfg = config_store.data
             if cfg.telemetry_enabled and cfg.telemetry_endpoint and cfg.telemetry_anon_id:
-                accounts = account_store.load()
                 payload = telemetry_mod.build_payload(
                     anon_id=cfg.telemetry_anon_id,
                     version=os.getenv("MAX_VERSION", "max-userbot/dev"),
@@ -3014,8 +2972,8 @@ async def telemetry_loop(interval: int = 3600) -> None:
                     modules_count=len(module_registry.modules),
                     commands_count=sum(len(m.commands) for m in module_registry.modules.values()),
                     watchers_count=len(module_registry.packet_watchers),
-                    accounts_total=len(accounts),
-                    accounts_authorized=sum(1 for a in accounts if a.state == "authorized"),
+                    accounts_total=len(multiaccount_manager.accounts),
+                    accounts_authorized=sum(1 for a in multiaccount_manager.accounts.values() if a.state == "authorized"),
                     packets_in=stats.packets_in,
                     packets_out=stats.packets_out,
                     commands_processed=stats.commands_handled,

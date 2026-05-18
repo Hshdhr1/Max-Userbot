@@ -62,16 +62,9 @@ def escape_html(text: str) -> str:
 async def answer(message: MaxMessage, text: str, **kwargs: Any) -> MaxMessage:
     """Аналог Hikka `utils.answer` — редактирует своё сообщение текстом.
 
-    Если передано `file`, пытается отправить файл.
     `reply_markup` и прочее игнорируется — у Max нет полноценных инлайн-кнопок.
     """
-    if "file" in kwargs:
-        from userbot import stats
-        # MaxClient не имеет удобного send_file в текущем API адаптера,
-        # но мы можем попробовать использовать низкоуровневый клиент.
-        # Для простоты пока просто редактируем текст.
-        pass
-
+    # В текущей версии API MAX через vkmax редактирование сообщения поддерживает только текст.
     await message.edit(text)
     return message
 

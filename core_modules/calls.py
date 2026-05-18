@@ -41,9 +41,14 @@ def setup(registry):
                     description="Показать активные звонки",
                     aliases=["активзвонки"]
                 ),
+                ModuleCommand(
+                    name="autocall",
+                    description="Настройка авто-действий .autocall <accept|reject|off>",
+                    aliases=["автозвонок"]
+                ),
             ],
             builtin=True,
-            version="1.0.0"
+            version="1.1.0"
         )
     )
     
@@ -53,6 +58,7 @@ def setup(registry):
     registry.register_dynamic_command("endcall", handle_end_call)
     registry.register_dynamic_command("rejectcall", handle_reject_call)
     registry.register_dynamic_command("activcalls", handle_active_calls)
+    registry.register_dynamic_command("autocall", handle_autocall)
 
 
 async def handle_call(ctx, chat_id: int, message_id: int, arg: str) -> str:
@@ -170,9 +176,35 @@ async def handle_active_calls(ctx, chat_id: int, message_id: int, arg: str) -> s
     for call in calls:
         lines.append(
             f"📞 <code>{html.escape(call.call_id)}</code>\n"
+            f"   Аккаунт: <b>{html.escape(call.account_label)}</b>\n"
             f"   Чат: {call.chat_id}\n"
             f"   Статус: {call.status}\n"
             f"   Тип: {call.type}"
         )
     
     return "\n".join(lines)
+
+
+async def handle_autocall(ctx, chat_id: int, message_id: int, arg: str) -> str:
+    """Обработчик настройки авто-звонков."""
+    from core.client_manager import call_manager
+
+    if not arg:
+        status = "ACCEPT" if call_manager.auto_accept else "REJECT" if call_manager.auto_reject else "OFF"
+        return f"Текущий режим авто-звонков: <b>{status}</b>\nИспользование: .autocall <accept|reject|off>"
+
+    mode = arg.strip().lower()
+    if mode == "accept":
+        call_manager.auto_accept = True
+        call_manager.auto_reject = False
+        return "Авто-принятие звонков: <b>ВКЛ</b>"
+    elif mode == "reject":
+        call_manager.auto_accept = False
+        call_manager.auto_reject = True
+        return "Авто-отклонение звонков: <b>ВКЛ</b>"
+    elif mode == "off":
+        call_manager.auto_accept = False
+        call_manager.auto_reject = False
+        return "Авто-действия для звонков: <b>ВЫКЛ</b>"
+    else:
+        return "Неизвестный режим. Используйте: accept, reject, off"

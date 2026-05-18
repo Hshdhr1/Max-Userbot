@@ -1,6 +1,6 @@
-# 📚 Документация по созданию модулей для Maxli UserBot
+# 📚 Документация по созданию модулей для MaxUB UserBot
 
-> **Maxli** использует библиотеку [PyMax (maxapi-python)](https://fresh-milkshake.github.io/pymax/) — Python-обёртку для Max Messenger API.
+> **MaxUB** использует библиотеку [PyMax (maxapi-python)](https://fresh-milkshake.github.io/pymax/) — Python-обёртку для Max Messenger API.
 >
 > 📖 Полная документация PyMax: https://fresh-milkshake.github.io/pymax/
 
@@ -8,7 +8,7 @@
 
 1. [Быстрый старт](#быстрый-старт)
 2. [Структура модуля](#структура-модуля)
-3. [Maxli API](#maxli-api)
+3. [MaxUB API](#MaxUB-api)
 4. [Прямой доступ к PyMax](#прямой-доступ-к-pymax)
 5. [Форматирование текста](#форматирование-текста)
 6. [Работа с файлами и медиа](#работа-с-файлами-и-медиа)
@@ -27,7 +27,7 @@
 # version: 1.0.0
 # developer: Ваше имя
 # id: my_module
-# min-maxli: 35
+# min-MaxUB: 35
 
 async def hello_command(api, message, args):
     await api.edit(message, "👋 **Привет!**", markdown=True)
@@ -54,7 +54,7 @@ async def register(api):
 # version: 1.0.0
 # developer: Имя разработчика
 # id: unique_module_id
-# min-maxli: 35
+# min-MaxUB: 35
 ```
 
 | Поле | Описание |
@@ -63,7 +63,7 @@ async def register(api):
 | `version` | Версия модуля (semver) |
 | `developer` | Имя разработчика |
 | `id` | Уникальный ID |
-| `min-maxli` | Минимальная версия Maxli |
+| `min-MaxUB` | Минимальная версия MaxUB |
 
 ### Основные функции
 
@@ -75,7 +75,7 @@ async def register(api):
 
 ---
 
-## Maxli API
+## MaxUB API
 
 ### Работа с сообщениями
 

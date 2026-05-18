@@ -15,11 +15,11 @@ from pathlib import Path
 from core import loader as core_loader
 from core.db import db as kv_db
 from core.multiaccount import AccountEntry as MultiAccountEntry
+from core.client_manager import call_manager
 from core.multiaccount import multiaccount_manager
 from core.security import hash_password
 from userbot import (
     SESSION_FILE,
-    account_store,
     config_store,
     module_registry,
     on_packet,
@@ -120,10 +120,18 @@ def _migrate_legacy_session() -> None:
 
     # Подбираем телефон из старого accounts.json (формат userbot.AccountStore).
     phone = ""
-    for legacy in account_store.load():
-        if legacy.label.lower() == "main":
-            phone = legacy.phone
-            break
+    try:
+        import json
+        if ACCOUNTS_FILE := Path("accounts.json"):
+            if ACCOUNTS_FILE.exists():
+                rows = json.loads(ACCOUNTS_FILE.read_text(encoding="utf-8"))
+                if isinstance(rows, list):
+                    for row in rows:
+                        if isinstance(row, dict) and str(row.get("label", "")).lower() == "main":
+                            phone = str(row.get("phone", ""))
+                            break
+    except Exception:
+        pass
 
     multiaccount_manager.accounts["main"] = MultiAccountEntry(
         label="main",
@@ -219,6 +227,9 @@ async def main():
     # client здесь None — он становится доступен после connect_account, но команды
     # уже зарегистрированы и будут диспатчиться корректно.
     await _load_class_modules(client=None)
+
+    # Устанавливаем связь между менеджерами
+    call_manager.set_multiaccount_manager(multiaccount_manager)
 
     # Регистрируем callback по умолчанию, чтобы все аккаунты получали обработчик автоматически
     multiaccount_manager.set_default_callback(on_packet)

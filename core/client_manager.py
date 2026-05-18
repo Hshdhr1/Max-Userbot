@@ -30,15 +30,21 @@ class CallManager:
     """Менеджер звонков с поддержкой мультиаккаунта."""
     
     # Предположительные opcode для звонков
-    OP_START_CALL = 200
-    OP_ACCEPT_CALL = 201
-    OP_END_CALL = 202
-    OP_REJECT_CALL = 203
+    OP_INCOMING_CALL = 199 # Уведомление о входящем
+    OP_START_CALL = 200    # Начать/Исходящий
+    OP_ACCEPT_CALL = 201   # Принять
+    OP_END_CALL = 202      # Завершить
+    OP_REJECT_CALL = 203   # Отклонить
     
     def __init__(self):
         self.active_calls: dict[str, CallInfo] = {}
         self.call_handlers: list[Callable] = []
         self._multiaccount_manager = None
+
+        # Настройки
+        self.auto_accept = False
+        self.auto_reject = False
+        self.blacklist_users = set()
     
     def set_multiaccount_manager(self, manager):
         """Установка ссылки на мультиаккаунт менеджер."""
@@ -155,6 +161,42 @@ class CallManager:
     def get_active_calls_for_account(self, account_label: str) -> list[CallInfo]:
         """Получение активных звонков для конкретного аккаунта."""
         return [c for c in self.active_calls.values() if c.account_label == account_label]
+
+    async def handle_packet(self, client_label: str, packet: dict):
+        """Обработка пакетов звонков от MaxClient."""
+        opcode = packet.get("opcode")
+        payload = packet.get("payload", {})
+
+        # Входящий звонок
+        if opcode == self.OP_INCOMING_CALL:
+            call_id = payload.get("callId")
+            caller_id = payload.get("callerId")
+            chat_id = payload.get("chatId", 0)
+
+            logger.info(f"[{client_label}] Входящий звонок {call_id} от {caller_id}")
+
+            self.active_calls[call_id] = CallInfo(
+                call_id=call_id,
+                chat_id=chat_id,
+                caller_id=caller_id,
+                callee_id=0, # Мы
+                status="ringing",
+                account_label=client_label
+            )
+
+            if self.auto_reject or caller_id in self.blacklist_users:
+                logger.info(f"[{client_label}] Авто-отклонение звонка {call_id}")
+                await self.reject_call(client_label, call_id)
+            elif self.auto_accept:
+                logger.info(f"[{client_label}] Авто-принятие звонка {call_id}")
+                await self.accept_call(client_label, call_id)
+
+        # Обновление статуса (если есть пакеты изменения состояния)
+        elif opcode == self.OP_END_CALL:
+            call_id = payload.get("callId")
+            if call_id in self.active_calls:
+                logger.info(f"[{client_label}] Звонок {call_id} завершён удалённо")
+                del self.active_calls[call_id]
 
 
 # Глобальный экземпляр

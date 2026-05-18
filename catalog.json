@@ -40,7 +40,7 @@
     },
     {
       "name": "Notes",
-      "description": "Модуль для создания и управления текстовыми заметками. Команды: .save, .get, .notes, .delnote.",
+      "description": "Модуль для создания и управления текстовыми заметками. Команды: .save, .getnote, .notes, .delnote.",
       "version": "1.0",
       "author": "Max-Userbot",
       "filename": "notes.py",

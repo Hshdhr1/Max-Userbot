@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://github.com/Igroshka/Maxli/blob/main/logo.png?raw=true" alt="Maxli Logo" width="150" style="border-radius:50% !important;" />
+  <img src="https://github.com/Igroshka/MaxUB/blob/main/logo.png?raw=true" alt="MaxUB Logo" width="150" style="border-radius:50% !important;" />
 </p>
 
 <h1 align="center">Max Userbot — UserBot для мессенджера "Max"</h1>
@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Igroshka/Maxli/refs/heads/main/banner1.png" alt="Maxli Banner" width="100%" style="border-radius:5% !important;" />
+  <img src="https://raw.githubusercontent.com/Igroshka/MaxUB/refs/heads/main/banner1.png" alt="MaxUB Banner" width="100%" style="border-radius:5% !important;" />
 </p>
 
 ---

@@ -73,10 +73,25 @@ class MultiAccountManager:
         
         try:
             data = json.loads(ACCOUNTS_FILE.read_text(encoding="utf-8"))
-            self.accounts = {
-                entry["label"]: AccountEntry(**entry) 
-                for entry in data
-            }
+            if not isinstance(data, list):
+                logger.warning("Accounts file is not a list")
+                return
+
+            from dataclasses import fields
+            known_fields = {f.name for f in fields(AccountEntry)}
+
+            new_accounts = {}
+            for entry in data:
+                if not isinstance(entry, dict) or "label" not in entry:
+                    continue
+                filtered = {k: v for k, v in entry.items() if k in known_fields}
+                try:
+                    acc = AccountEntry(**filtered)
+                    new_accounts[acc.label] = acc
+                except TypeError as exc:
+                    logger.warning(f"Failed to load account {entry.get('label')}: {exc}")
+
+            self.accounts = new_accounts
             logger.info(f"Загружено {len(self.accounts)} аккаунтов")
         except Exception as exc:
             logger.warning(f"Не удалось загрузить аккаунты: {exc}")
